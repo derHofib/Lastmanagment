@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.loadmanager.engine import PHASES
 from app.loadmanager.loop import service
-from app.models import ChargingStation, DistributionBoard
+from app.models import ChargePoint, DistributionBoard
 from app.schemas import (
     BoardTreeNode,
     BoardTreeStation,
@@ -79,36 +79,37 @@ def get_tree(session: Session = Depends(get_session)):
     for b in session.query(DistributionBoard).all():
         if b.parent_board_id is not None:
             children_of.setdefault(b.parent_board_id, []).append(b)
-    stations_of: dict[int | None, list[ChargingStation]] = {}
-    for st in session.query(ChargingStation).all():
-        stations_of.setdefault(st.distribution_board_id, []).append(st)
+    cps_of: dict[int | None, list[ChargePoint]] = {}
+    for cp in session.query(ChargePoint).all():
+        cps_of.setdefault(cp.distribution_board_id, []).append(cp)
 
-    snap_stations = service.snapshot.get("stations", {})
+    snap_cps = service.snapshot.get("charge_points", {})
 
     def build(board: DistributionBoard) -> BoardTreeNode:
-        # Stationen ohne Zuweisung (distribution_board_id IS NULL) hängen
+        # Ladepunkte ohne Zuweisung (distribution_board_id IS NULL) hängen
         # implizit an der Wurzel – siehe app.loadmanager.loop._cycle.
-        my_stations = list(stations_of.get(board.id, []))
+        my_cps = list(cps_of.get(board.id, []))
         if board.parent_board_id is None:
-            my_stations += stations_of.get(None, [])
+            my_cps += cps_of.get(None, [])
 
         load = {p: 0.0 for p in PHASES}
         station_nodes = []
-        for st in my_stations:
-            live = snap_stations.get(st.id, {})
+        for cp in my_cps:
+            live = snap_cps.get(cp.id, {})
             online = bool(live.get("online"))
             setpoint = live.get("setpoint_a") or 0.0
             if online:
-                for p in st.phases:
+                for p in cp.phases:
                     load[p] += setpoint
             station_nodes.append(
                 BoardTreeStation(
-                    id=st.id,
-                    name=st.name,
-                    circuit_breaker_a=st.circuit_breaker_a,
-                    max_current_a=st.max_current_a,
+                    id=cp.id,
+                    name=cp.name,
+                    circuit_breaker_a=cp.circuit_breaker_a,
+                    max_current_a=cp.max_current_a,
                     online=online,
                     setpoint_a=live.get("setpoint_a"),
+                    pv_surplus_only=cp.pv_surplus_only,
                 )
             )
 
@@ -124,6 +125,7 @@ def get_tree(session: Session = Depends(get_session)):
             name=board.name,
             incoming_fuse_a=board.incoming_fuse_a,
             priority=board.priority,
+            strategy=board.strategy,
             location=board.location,
             load_a=load,
             stations=station_nodes,
@@ -168,8 +170,8 @@ def delete_board(board_id: int, session: Session = Depends(get_session)):
         raise HTTPException(409, "Die Hauptverteilung kann nicht gelöscht werden")
     if session.query(DistributionBoard).filter_by(parent_board_id=board_id).count():
         raise HTTPException(409, "Verteiler hat noch Unterverteilungen")
-    if session.query(ChargingStation).filter_by(distribution_board_id=board_id).count():
-        raise HTTPException(409, "Verteiler hat noch zugewiesene Ladestationen")
+    if session.query(ChargePoint).filter_by(distribution_board_id=board_id).count():
+        raise HTTPException(409, "Verteiler hat noch zugewiesene Ladepunkte")
     session.delete(board)
     session.commit()
     return None

@@ -45,20 +45,13 @@
       </div>
     </section>
 
-    <!-- Stationen -->
+    <!-- Stationen (physische Verbindung) + ihre Ladepunkte -->
     <section id="stations" class="view">
       <div class="toolbar">
-        <h2>Ladestationen</h2>
+        <h2>Ladestationen &amp; Ladepunkte</h2>
         <button class="btn" onclick="openStation()">+ Neue Station</button>
       </div>
-      <div class="card">
-        <table>
-          <thead>
-            <tr><th>Name</th><th>IP:Port</th><th>Unit</th><th>Profil</th><th>Verteiler</th><th>Phasen</th><th>Prio</th><th>Min/Max A</th><th>Aktiv</th><th></th></tr>
-          </thead>
-          <tbody id="stations-tbody"></tbody>
-        </table>
-      </div>
+      <div id="stations-list"></div>
     </section>
 
     <!-- Verteilung (Hauptverteilung / Unterverteilung / Abgänge) -->
@@ -106,6 +99,7 @@
 
   <!-- Dialoge -->
   <dialog id="station-dialog"></dialog>
+  <dialog id="chargepoint-dialog"></dialog>
   <dialog id="profile-dialog"></dialog>
   <dialog id="board-dialog"></dialog>
   <input type="file" id="import-file" accept="application/json" style="display:none" />

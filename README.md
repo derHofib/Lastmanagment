@@ -17,10 +17,23 @@ die Weboberfläche/Datenbank anlegen – ohne den Code zu ändern.
   Datentypen (`uint16/int16/uint32/int32/float32/float64/bool`) inkl.
   Byte-/Wort-Reihenfolge (Big/Little-Endian, Word-Swap), Skalierung & Offset.
 - **Lastmanagement-Engine:** phasengenaue Verteilung (L1/L2/L3), Strategien
-  `equal` / `priority` / `fifo`, Minimalstrom-Regel (Pausieren statt
-  Unterschreiten), Hysterese/Haltezeiten gegen Relais-Flattern.
+  `equal` / `priority` / `fifo` – **global oder individuell je Verteiler**
+  (Verteiler ohne eigene Angabe erben die Strategie des übergeordneten
+  Verteilers bzw. zuletzt die globale Einstellung), Minimalstrom-Regel
+  (Pausieren statt Unterschreiten), Hysterese/Haltezeiten gegen Relais-Flattern.
 - **Statisch & dynamisch:** feste Gesamtgrenze oder dynamisch abzüglich der
   Haus-Grundlast (Netzanschlusszähler ebenfalls per Geräteprofil eingebunden).
+- **Ladestationen mit mehreren Ladepunkten (Doppel-Wallboxen):** eine
+  Ladestation ist die physische Modbus-Verbindung, jeder **Ladepunkt**
+  (Connector) wird unabhängig mit eigener Priorität, Phasenanschluss,
+  Min/Max-Strom, Verteiler-Zuordnung und Fail-Safe gesteuert.
+- **Zeitsteuerung:** je Ladepunkt beliebig viele wiederkehrende
+  Wochen-Sperrfenster (Wochentage + Start-/Endzeit, auch über Mitternacht) –
+  der Ladepunkt wird während des Fensters automatisch pausiert.
+- **PV-Überschussladen:** je Ladepunkt einzeln aktivierbar (`pv_surplus_only`);
+  PV-Ladepunkte laden ausschließlich mit gemessenem Netzeinspeise-Überschuss,
+  nachrangig zu regulär ladenden Punkten und begrenzt durch die jeweils noch
+  freie Absicherung im Verteilungsbaum.
 - **Fail-Safe:** definierter sicherer Zustand pro Station bei
   Kommunikationsverlust; harte Summenbegrenzung je Phase; konservative
   Reservierung für unerreichbare Stationen.
@@ -99,16 +112,28 @@ Datenfluss im Regelzyklus (`app/loadmanager/loop.py`):
   `register_address`, `function_code` (3/4/6/16), `data_type`, optional
   `byte_order`/`word_order`, `scale`, `offset`, `unit`, `enum_map`,
   `writable_min`/`writable_max`.
-- **ChargingStation** – konkrete Box: IP/Port/Unit-ID, Profil, `phase_config`
-  (`1p_l1`/`1p_l2`/`1p_l3`/`3p`), `priority`, `min/max_current_a`, `safe_state`.
+- **ChargingStation** – nur die physische Modbus-Verbindung: `name`,
+  `location`, `ip_address`, `tcp_port`, `unit_id`, `profile_id`. Hat eine
+  Relation `charge_points` (1:n).
+- **ChargePoint** – der eigentlich steuerbare/zuteilbare Ladepunkt einer
+  Station: `connector_suffix` (`""` für einen einzelnen Ladepunkt, `"_1"`/
+  `"_2"` … für Doppel-Wallboxen – bestimmt, welche Register im Geräteprofil
+  zu diesem Ladepunkt gehören, z. B. `set_current_1`/`set_current_2`),
+  `phase_config` (`1p_l1`/`1p_l2`/`1p_l3`/`3p`), `priority`, `min/max_current_a`,
+  `distribution_board_id`, `circuit_breaker_a`, `enabled`, `safe_state`,
+  `pv_surplus_only`. Hat eine Relation `schedules` (1:n).
+- **ChargeSchedule** – wiederkehrendes Sperrfenster eines Ladepunkts:
+  `weekdays_mask` (Bit 0 = Montag … Bit 6 = Sonntag), `start_time`, `end_time`
+  (`start_time > end_time` = Fenster über Mitternacht).
 - **GlobalConfig** – `grid_limit_current_a`, `management_mode`,
   `distribution_strategy`, `poll_interval_s`, Hysterese, Fail-Safe, Zähler,
   §14a.
-- **Measurement** – optionale Messwert-Historie.
+- **Measurement** – optionale Messwert-Historie je Ladepunkt.
 - **DistributionBoard** – Verteiler (Hauptverteilung/Unterverteilung) im
   Verteilungsbaum: `name`, `parent_board_id` (selbstreferenziell, `None` =
   Wurzel/Hauptverteilung), `incoming_fuse_a` (Absicherung der Zuleitung),
-  `priority`.
+  `priority`, `strategy` (optional; `None` = erbt vom übergeordneten
+  Verteiler bzw. zuletzt von der globalen Strategie).
 
 ---
 
@@ -136,6 +161,65 @@ aktuelle Auslastung je Phase gegen die jeweilige Absicherung.
 Beispiel: Zwei Ladestationen (je bis 32 A fähig) hängen an einer
 Unterverteilung mit nur 20 A Absicherung → jede bekommt trotz höherer
 Netzgrenze und höherem Wallbox-Maximum nur 10 A zugeteilt (Summe = 20 A).
+
+**Verteilstrategie pro Verteiler:** Jeder Verteiler kann optional eine eigene
+Strategie (`equal`/`priority`/`fifo`) festlegen, die für seinen kompletten
+Unterbaum gilt, sofern ein Kind-Verteiler nicht selbst wieder etwas anderes
+festlegt (Kaskadierung wie bei CSS). Ohne Angabe gilt die global eingestellte
+Strategie. So kann z. B. eine Unterverteilung im Carport `priority` fahren,
+während der Rest der Anlage `equal` verteilt.
+
+---
+
+## Doppel-Wallboxen (zwei Ladepunkte je Station)
+
+Eine **Ladestation** ist nur die physische Modbus-TCP-Verbindung (IP, Port,
+Unit-ID, Geräteprofil). Jede Station hat einen oder mehrere **Ladepunkte**
+(Connectoren), die unabhängig voneinander mit eigener Priorität, eigenem
+Phasenanschluss, eigenen Strom-Grenzen, eigener Verteiler-Zuordnung und
+eigenem Fail-Safe-Verhalten gesteuert werden. Bei einer Doppel-Wallbox liest
+der Modbus-Client die Register **einmal pro Verbindung** (ein Roundtrip
+deckt beide Ladepunkte ab); welche Register zu welchem Ladepunkt gehören,
+bestimmt die Konvention `key + connector_suffix` (z. B. `set_current_1`/
+`set_current_2`, `current_l1_1`/`current_l1_2`) – das Geräteprofil braucht
+dafür keine Schemaänderung, `key` ist bereits ein freier String.
+
+Im Web-UI unter *Ladestationen*: pro Station eine Karte mit ihren
+Ladepunkten; „+ Ladepunkt" fügt einer bestehenden Station einen zweiten
+Ladepunkt (mit eigenem `connector_suffix`) hinzu.
+
+---
+
+## Zeitsteuerung (wiederkehrende Sperrfenster)
+
+Jeder Ladepunkt kann beliebig viele wiederkehrende Wochenfenster erhalten
+(Wochentage per Checkbox + Start-/Endzeit). Liegt die aktuelle lokale Zeit
+(Europe/Berlin) innerhalb eines passenden Fensters, wird der Ladepunkt für
+diesen Regelzyklus automatisch pausiert – wie ein zeitgesteuertes
+`enabled=false`. Fenster über Mitternacht (z. B. 22:00–06:00) werden korrekt
+behandelt: Der frühe Teil nach Mitternacht gehört noch zum Fenster des
+Starttags. Das manuelle Ein-/Ausschalten (`enabled`) bleibt davon unabhängig
+für den Sofort-Fall erhalten. Reine Logik in `app/loadmanager/schedule.py`
+(`is_blocked()`), getestet in `tests/test_schedule.py`.
+
+---
+
+## PV-Überschussladen
+
+Ladepunkte mit aktiviertem `pv_surplus_only` laden **ausschließlich** mit
+gemessenem Netzeinspeise-Überschuss (erfordert dynamisches Lastmanagement
+mit angebundenem Netzanschlusszähler) und **nachrangig** zu regulär
+ladenden Ladepunkten. Die Zuteilung läuft pro Regelzyklus zweistufig:
+
+1. **Lauf 1:** alle regulären Ladepunkte gegen die normale Kapazität
+   (Netzgrenze bzw. dynamische Grenze abzüglich Grundlast) – unverändertes
+   `allocate_tree()`.
+2. **Lauf 2:** die noch freie Absicherung je Verteiler-Knoten wird aus
+   Lauf 1 berechnet (`remaining_capacity_tree()`); PV-Ladepunkte werden
+   gegen `min(gemessener PV-Überschuss, freie Absicherung)` verteilt.
+
+Ohne verfügbaren Überschuss (oder ohne Zählerdaten) bekommen PV-Ladepunkte
+konsequent 0 A – kein stillschweigender Rückfall auf Netzladen.
 
 ---
 
@@ -214,12 +298,18 @@ journalctl -u lastmanagement -f
 
 1. **Geräteprofil anlegen** (oder `examples/beispiel_wallbox.json` importieren)
    unter *Geräteprofile*.
-2. **Ladestation anlegen** unter *Ladestationen* (IP, Port, Unit-ID, Profil,
-   Phasenanschluss, Priorität, Min/Max-Strom, Fail-Safe-Verhalten). Mit
-   *Test* die Verbindung/Profilzuordnung prüfen.
-3. **Einstellungen** vornehmen: Netzgrenze pro Phase, Modus (statisch/dynamisch),
-   Strategie, Polling-Intervall, Hysterese, Fail-Safe, optional Zähler und §14a.
-4. **Dashboard** zeigt Live-Last pro Phase gegen die Grenze und alle Ladepunkte
+2. **Ladestation anlegen** unter *Ladestationen* (IP, Port, Unit-ID, Profil).
+   Mit *Test* die Verbindung/Profilzuordnung prüfen.
+3. **Ladepunkt(e) anlegen** an der Station (bei Doppel-Wallboxen zwei, mit
+   unterschiedlichem `connector_suffix`): Phasenanschluss, Priorität,
+   Min/Max-Strom, Verteiler-Zuordnung, Abgangssicherung, Fail-Safe-Verhalten,
+   optional PV-Überschussladen und Zeitplan (Wochentage + Uhrzeit).
+4. **Verteiler** anlegen/bearbeiten unter *Verteilung*, optional mit eigener
+   Verteilstrategie je Zweig.
+5. **Einstellungen** vornehmen: Netzgrenze pro Phase, Modus (statisch/dynamisch),
+   globale Strategie, Polling-Intervall, Hysterese, Fail-Safe, optional Zähler
+   und §14a.
+6. **Dashboard** zeigt Live-Last pro Phase gegen die Grenze und alle Ladepunkte
    mit Ist-/Soll-Strom und Status.
 
 ---
@@ -283,9 +373,15 @@ Abgedeckt:
 - **Lastmanagement** (`tests/test_loadmanager.py`): equal/priority/fifo,
   Phasengenauigkeit, Minimalstrom-Regel, Grenzwert-Garantie unter Zufallslasten,
   Hysterese/Haltezeiten, hierarchische Verteilungshierarchie (`allocate_tree`)
-  inkl. Engpass auf Unterverteiler-Ebene und Zufallsbäumen.
-- **API** (`tests/test_api.py`): CRUD für Profile/Stationen/Config/Verteiler,
-  Validierung (u. a. Zyklenschutz im Verteilungsbaum), Import/Export, Status.
+  inkl. Engpass auf Unterverteiler-Ebene und Zufallsbäumen, Strategie-Vererbung
+  über mehrere Verteiler-Ebenen, zweistufige PV-Überschuss-Zuteilung
+  (`remaining_capacity_tree`/`subtree_totals`).
+- **Zeitsteuerung** (`tests/test_schedule.py`): Sperrfenster innerhalb/außerhalb
+  eines Tages, Mitternachts-Wrap (inkl. Wochentag-Grenzfälle), mehrere Fenster.
+- **API** (`tests/test_api.py`): CRUD für Profile/Stationen/Ladepunkte
+  (inkl. Zeitpläne, Doppel-Ladepunkt-Szenario, PV-Flag)/Config/Verteiler
+  (inkl. Strategie-Feld), Validierung (u. a. Zyklenschutz im
+  Verteilungsbaum), Import/Export, Status.
 - **Modbus-Integration** (`tests/test_integration_modbus.py`): End-to-end gegen
   einen echten `pymodbus`-TCP-Server inkl. Schreiben & Clamping.
 
@@ -312,10 +408,12 @@ Datenbank gehalten.
 | PUT/DELETE | `/api/profiles/{id}` | Profil ändern/löschen |
 | POST | `/api/profiles/import` | Profil aus JSON importieren |
 | GET | `/api/profiles/{id}/export` | Profil als JSON exportieren |
-| GET/POST | `/api/stations` | Stationen auflisten/anlegen |
-| PUT/DELETE | `/api/stations/{id}` | Station ändern/löschen |
-| GET | `/api/stations/{id}/live` | aktuelle Messwerte |
+| GET/POST | `/api/stations` | Ladestationen (Modbus-Verbindungen) auflisten/anlegen |
+| PUT/DELETE | `/api/stations/{id}` | Station ändern/löschen (Kaskade auf ihre Ladepunkte) |
 | POST | `/api/stations/{id}/test` | Verbindungs-/Profiltest |
+| GET/POST | `/api/charge-points` | Ladepunkte auflisten/anlegen (inkl. Zeitpläne) |
+| PUT/DELETE | `/api/charge-points/{id}` | Ladepunkt ändern/löschen |
+| GET | `/api/charge-points/{id}/live` | aktuelle Messwerte des Ladepunkts |
 | GET/POST | `/api/boards` | Verteiler auflisten/anlegen |
 | PUT/DELETE | `/api/boards/{id}` | Verteiler ändern/löschen |
 | GET | `/api/boards/tree` | kompletter Verteilungsbaum inkl. Live-Auslastung |

@@ -11,6 +11,8 @@ from app.models.base import (
     SafeState,
     WordOrder,
 )
+from app.models.charge_point import ChargePoint
+from app.models.charge_schedule import ChargeSchedule
 from app.models.charging_station import ChargingStation
 from app.models.device_profile import DeviceProfile, RegisterMapping
 from app.models.distribution_board import DistributionBoard
@@ -28,6 +30,8 @@ __all__ = [
     "SafeState",
     "WordOrder",
     "ChargingStation",
+    "ChargePoint",
+    "ChargeSchedule",
     "DeviceProfile",
     "RegisterMapping",
     "DistributionBoard",

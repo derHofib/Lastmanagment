@@ -13,6 +13,8 @@ from app.loadmanager.engine import (
     allocate,
     allocate_tree,
     phase_totals,
+    remaining_capacity_tree,
+    subtree_totals,
 )
 from app.loadmanager.smoothing import SetpointSmoother
 from app.models.base import DistributionStrategy
@@ -223,25 +225,11 @@ def test_smoother_pause_always_immediate():
 
 # --- Verteilungshierarchie (Hauptverteilung / Unterverteilung) ------------
 
-def subtree_phase_totals(node: BoardNode, assignment: dict) -> dict:
-    """Summiert die Ströme aller Stationen im Teilbaum eines Knotens je Phase."""
-    totals = {p: 0.0 for p in PHASES}
-    for st in node.stations:
-        v = assignment.get(st.id, 0.0)
-        for p in st.phases:
-            totals[p] += v
-    for child in node.children:
-        child_totals = subtree_phase_totals(child, assignment)
-        for p in PHASES:
-            totals[p] += child_totals[p]
-    return totals
-
-
 def assert_tree_within_limits(node: BoardNode, assignment: dict) -> None:
     """Prüft rekursiv, dass an JEDEM Knoten des Baums dessen Absicherung
     (fuse_a) je Phase eingehalten wird – die zentrale Garantie von
     allocate_tree()."""
-    totals = subtree_phase_totals(node, assignment)
+    totals = subtree_totals(node, assignment)
     for p in PHASES:
         assert totals[p] <= node.fuse_a + 1e-6, (
             f"Verteiler {node.id}: Phase {p} überschritten "
@@ -341,3 +329,87 @@ def test_allocate_tree_random_never_exceeds_any_node(strategy):
     }
     for sid, st in all_stations.items():
         assert result[sid] == 0 or result[sid] >= st.min_current_a
+
+
+# --- Strategie pro Verteiler (Kaskadierung) --------------------------------
+
+def test_allocate_tree_board_strategy_override_changes_split():
+    # Unterverteilung überschreibt die globale EQUAL-Strategie auf PRIORITY
+    a = s(10, prio=10, mx=32, mn=6)
+    c = s(11, prio=1, mx=32, mn=6)
+    b = BoardNode(id=2, fuse_a=40, strategy=DistributionStrategy.PRIORITY, stations=(a, c))
+    root = BoardNode(id=1, fuse_a=100, children=(b,))
+
+    result = allocate_tree(root, cap(100, 100, 100), DistributionStrategy.EQUAL)
+
+    # Unter PRIORITY: höhere Priorität wird zuerst voll bedient, Rest an C
+    assert result[10] == 32
+    assert result[11] == 8
+    assert_tree_within_limits(root, result)
+
+
+def test_allocate_tree_board_strategy_inherits_to_grandchildren():
+    # Ein Unterverteiler OHNE eigene Strategie erbt von seinem Elternteil
+    # (nicht direkt von der globalen Default-Strategie).
+    leaf_a = s(20, prio=10, mx=16, mn=6)
+    leaf_c = s(21, prio=1, mx=16, mn=6)
+    leaf_board = BoardNode(id=3, fuse_a=30, stations=(leaf_a, leaf_c))
+    mid = BoardNode(id=2, fuse_a=30, strategy=DistributionStrategy.PRIORITY, children=(leaf_board,))
+    root = BoardNode(id=1, fuse_a=63, children=(mid,))
+
+    result = allocate_tree(root, cap(63, 63, 63), DistributionStrategy.EQUAL)
+
+    # leaf_board erbt PRIORITY von mid, nicht das globale EQUAL
+    assert result[20] == 16
+    assert result[21] == 14
+    assert_tree_within_limits(root, result)
+
+
+# --- PV-Überschussladen: zweiter, nachrangiger Verteilungslauf ------------
+
+def test_remaining_capacity_tree_basic():
+    grid_station = s(1, mx=32, mn=6)
+    root = BoardNode(id=1, fuse_a=63, stations=(grid_station,))
+    pass1 = allocate_tree(root, cap(63, 63, 63), DistributionStrategy.EQUAL)
+    assert pass1[1] == 32
+
+    pv_station = s(2, mx=16, mn=6)
+    pv_root = remaining_capacity_tree(root, pass1, {1: (pv_station,)})
+    assert pv_root.fuse_a == pytest.approx(63 - 32)
+    assert pv_root.stations == (pv_station,)
+
+
+def test_pv_two_pass_capped_by_remaining_fuse_not_raw_surplus():
+    # Unterverteilung mit 20 A Absicherung: eine Grid-Vorrang-Station zieht
+    # 14 A. Ein angenommener PV-Überschuss von 30 A an der Wurzel darf die
+    # PV-Only-Station NICHT voll bekommen, da die Unterverteilung selbst nur
+    # noch 20-14=6 A frei hat.
+    grid = s(1, mx=14, mn=6)
+    sub = BoardNode(id=2, fuse_a=20, stations=(grid,))
+    root = BoardNode(id=1, fuse_a=63, children=(sub,))
+
+    pass1 = allocate_tree(root, cap(63, 63, 63), DistributionStrategy.EQUAL)
+    assert pass1[1] == 14
+
+    pv_station = s(3, mx=32, mn=6)
+    pv_root = remaining_capacity_tree(root, pass1, {2: (pv_station,)})
+    surplus = 30.0
+    pv_capacity = {p: min(surplus, pv_root.fuse_a) for p in PHASES}
+    pass2 = allocate_tree(pv_root, pv_capacity, DistributionStrategy.EQUAL)
+
+    assert pass2[3] == 6
+    # Kombiniert darf die Unterverteiler-Absicherung nicht überschritten werden
+    assert pass1[1] + pass2[3] <= sub.fuse_a + 1e-6
+
+
+def test_pv_two_pass_zero_surplus_gives_zero():
+    grid = s(1, mx=20, mn=6)
+    root = BoardNode(id=1, fuse_a=63, stations=(grid,))
+    pass1 = allocate_tree(root, cap(63, 63, 63), DistributionStrategy.EQUAL)
+
+    pv_station = s(2, mx=16, mn=6)
+    pv_root = remaining_capacity_tree(root, pass1, {1: (pv_station,)})
+    pv_capacity = {p: min(0.0, pv_root.fuse_a) for p in PHASES}  # kein Überschuss
+    pass2 = allocate_tree(pv_root, pv_capacity, DistributionStrategy.EQUAL)
+
+    assert pass2[2] == 0

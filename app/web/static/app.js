@@ -4,6 +4,7 @@
 const nf = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
 const nf2 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
 const PHASES = ["L1", "L2", "L3"];
+const STRATEGY_TXT = { equal: "Gleichmäßig", priority: "Priorität", fifo: "FIFO" };
 
 // --- Hilfsfunktionen -------------------------------------------------------
 async function api(path, opts) {
@@ -49,6 +50,8 @@ function showView(name) {
 
 let profileCache = [];
 let boardCache = [];
+let stationCache = [];
+let chargePointCache = [];
 
 // --- Dashboard -------------------------------------------------------------
 async function refreshDashboard() {
@@ -70,16 +73,16 @@ async function refreshDashboard() {
   document.getElementById("phase-bars").innerHTML = bars;
 
   const modeTxt = { static: "Statisch", dynamic: "Dynamisch" }[status.management_mode] || status.management_mode;
-  const stratTxt = { equal: "Gleichmäßig", priority: "Priorität", fifo: "FIFO" }[status.distribution_strategy];
+  const stratTxt = STRATEGY_TXT[status.distribution_strategy] || status.distribution_strategy;
   document.getElementById("system-info").innerHTML = `
     <p><strong>Modus:</strong> ${modeTxt} &nbsp; <strong>Strategie:</strong> ${stratTxt}</p>
     <p><strong>Netzgrenze:</strong> ${nf.format(status.grid_limit_current_a)} A/Phase
        ${status.effective_limit_current_a < status.grid_limit_current_a
          ? `→ effektiv ${nf.format(status.effective_limit_current_a)} A` : ""}</p>
-    <p><strong>Aktive Ladepunkte:</strong> ${status.active_stations} / ${status.total_stations}</p>
+    <p><strong>Aktive Ladepunkte:</strong> ${status.active_charge_points} / ${status.total_charge_points}</p>
     ${status.en14a_active ? '<p><span class="badge err">§14a aktiv – Leistung reduziert</span></p>' : ""}`;
 
-  const rows = status.stations.map((s) => {
+  const rows = status.charge_points.map((s) => {
     const v = s.values || {};
     // Wichtig: Ströme verschiedener Phasen dürfen NICHT addiert werden (keine
     // elektrotechnisch sinnvolle Größe, da L1/L2/L3 i. d. R. unsymmetrisch
@@ -110,49 +113,74 @@ async function refreshDashboard() {
   }
 }
 
-// --- Stationen -------------------------------------------------------------
+// --- Stationen (physische Verbindung) + Ladepunkte ------------------------
+
+const PHASE_TXT = { "1p_l1": "1p L1", "1p_l2": "1p L2", "1p_l3": "1p L3", "3p": "3-phasig" };
+
 async function loadStations() {
-  const [stations, profiles, boards] = await Promise.all([
-    api("/api/stations"), api("/api/profiles"), api("/api/boards"),
+  const [stations, profiles, boards, chargePoints] = await Promise.all([
+    api("/api/stations"), api("/api/profiles"), api("/api/boards"), api("/api/charge-points"),
   ]);
+  stationCache = stations;
   profileCache = profiles;
   boardCache = boards;
+  chargePointCache = chargePoints;
+
   const pName = (id) => (profiles.find((p) => p.id === id) || {}).name || "?";
   const bName = (id) => (boards.find((b) => b.id === id) || {}).name || "Hauptverteilung";
-  const phaseTxt = { "1p_l1": "1p L1", "1p_l2": "1p L2", "1p_l3": "1p L3", "3p": "3-phasig" };
-  document.getElementById("stations-tbody").innerHTML = stations.map((s) => `
+
+  const cpRow = (cp) => `
     <tr>
-      <td>${esc(s.name)}${s.location ? `<div class="muted">${esc(s.location)}</div>` : ""}</td>
-      <td>${esc(s.ip_address)}:${s.tcp_port}</td>
-      <td>${s.unit_id}</td>
-      <td>${esc(pName(s.profile_id))}</td>
-      <td>${esc(bName(s.distribution_board_id))}${s.circuit_breaker_a != null ? `<div class="muted">Abgang: ${nf.format(s.circuit_breaker_a)} A</div>` : ""}</td>
-      <td>${phaseTxt[s.phase_config]}</td>
-      <td>${s.priority}</td>
-      <td>${nf.format(s.min_current_a)} / ${nf.format(s.max_current_a)}</td>
-      <td>${s.enabled ? '<span class="badge ok">ja</span>' : '<span class="badge idle">nein</span>'}</td>
+      <td>${esc(cp.name)}${cp.connector_suffix ? ` <span class="muted">(${esc(cp.connector_suffix)})</span>` : ""}</td>
+      <td>${bName(cp.distribution_board_id)}${cp.circuit_breaker_a != null ? `<div class="muted">Abgang: ${nf.format(cp.circuit_breaker_a)} A</div>` : ""}</td>
+      <td>${PHASE_TXT[cp.phase_config]}</td>
+      <td>${cp.priority}</td>
+      <td>${nf.format(cp.min_current_a)} / ${nf.format(cp.max_current_a)}</td>
+      <td>${cp.pv_surplus_only ? '<span class="badge pv">PV</span>' : "–"}</td>
+      <td>${cp.schedules.length ? `<span class="badge idle">${cp.schedules.length} Zeitfenster</span>` : "–"}</td>
+      <td>${cp.enabled ? '<span class="badge ok">ja</span>' : '<span class="badge idle">nein</span>'}</td>
       <td style="white-space:nowrap">
-        <button class="btn small secondary" onclick='testStation(${s.id})'>Test</button>
-        <button class="btn small secondary" onclick='openStation(${s.id})'>Bearb.</button>
-        <button class="btn small danger" onclick='deleteStation(${s.id})'>Löschen</button>
+        <button class="btn small secondary" onclick='openChargePoint(${cp.id})'>Bearb.</button>
+        <button class="btn small danger" onclick='deleteChargePoint(${cp.id})'>Löschen</button>
       </td>
-    </tr>`).join("") || '<tr><td colspan="10" class="muted">Noch keine Stationen.</td></tr>';
+    </tr>`;
+
+  document.getElementById("stations-list").innerHTML = stations.map((s) => {
+    const cps = chargePoints.filter((cp) => cp.station_id === s.id);
+    return `
+    <div class="card">
+      <div class="station-card-header">
+        <div>
+          <span class="name">${esc(s.name)}</span>
+          <span class="muted"> · ${esc(s.ip_address)}:${s.tcp_port} · Unit ${s.unit_id} · ${esc(pName(s.profile_id))}</span>
+          ${s.location ? `<div class="muted">${esc(s.location)}</div>` : ""}
+        </div>
+        <div>
+          <button class="btn small secondary" onclick='testStation(${s.id})'>Test</button>
+          <button class="btn small secondary" onclick='openStation(${s.id})'>Bearb.</button>
+          <button class="btn small danger" onclick='deleteStation(${s.id})'>Löschen</button>
+          <button class="btn small" onclick='openChargePoint(0, ${s.id})'>+ Ladepunkt</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Ladepunkt</th><th>Verteiler</th><th>Phasen</th><th>Prio</th><th>Min/Max A</th><th>PV</th><th>Zeitplan</th><th>Aktiv</th><th></th></tr>
+        </thead>
+        <tbody>${cps.map(cpRow).join("") || '<tr><td colspan="9" class="muted">Noch kein Ladepunkt – „+ Ladepunkt" anlegen.</td></tr>'}</tbody>
+      </table>
+    </div>`;
+  }).join("") || '<p class="muted">Noch keine Stationen.</p>';
 }
 
 async function openStation(id) {
   if (!profileCache.length) profileCache = await api("/api/profiles");
   if (!profileCache.length) { toast("Bitte zuerst ein Geräteprofil anlegen.", true); return; }
-  if (!boardCache.length) boardCache = await api("/api/boards");
   const s = id ? await api("/api/stations/" + id) : {
     name: "", location: "", ip_address: "", tcp_port: 502, unit_id: 1,
-    profile_id: profileCache[0].id, phase_config: "3p", priority: 0,
-    max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "block",
-    distribution_board_id: null, circuit_breaker_a: null,
+    profile_id: profileCache[0].id,
   };
   const opts = profileCache.map((p) =>
     `<option value="${p.id}" ${p.id === s.profile_id ? "selected" : ""}>${esc(p.name)}</option>`).join("");
-  const boardOpts = boardCache.map((b) =>
-    `<option value="${b.id}" ${b.id === s.distribution_board_id ? "selected" : ""}>${esc(b.name)}</option>`).join("");
   const dlg = document.getElementById("station-dialog");
   dlg.innerHTML = `
     <h2>${id ? "Station bearbeiten" : "Neue Station"}</h2>
@@ -167,35 +195,10 @@ async function openStation(id) {
     </div>
     <div class="row">
       <div class="field"><label>Geräteprofil</label><select id="st-profile">${opts}</select></div>
-      <div class="field"><label>Phasenanschluss</label>
-        <select id="st-phase">
-          ${["3p", "1p_l1", "1p_l2", "1p_l3"].map((p) =>
-            `<option value="${p}" ${p === s.phase_config ? "selected" : ""}>${p}</option>`).join("")}
-        </select></div>
-      <div class="field"><label>Priorität</label><input id="st-prio" type="number" value="${s.priority}"></div>
     </div>
-    <div class="row">
-      <div class="field"><label>Verteiler (Abgang hängt an)</label><select id="st-board">${boardOpts}</select></div>
-      <div class="field"><label>Absicherung Abgang (A)</label>
-        <input id="st-breaker" type="number" step="0.1" value="${s.circuit_breaker_a ?? ""}" placeholder="optional"></div>
-    </div>
-    <div class="row">
-      <div class="field"><label>Min-Strom (A)</label><input id="st-min" type="number" step="0.1" value="${s.min_current_a}"></div>
-      <div class="field"><label>Max-Strom (A)</label><input id="st-max" type="number" step="0.1" value="${s.max_current_a}"></div>
-      <div class="field"><label>Fail-Safe</label>
-        <select id="st-safe">
-          <option value="block" ${s.safe_state === "block" ? "selected" : ""}>Sperren (0 A)</option>
-          <option value="min_current" ${s.safe_state === "min_current" ? "selected" : ""}>Minimalstrom</option>
-        </select></div>
-      <div class="field"><label>Aktiv</label>
-        <select id="st-enabled">
-          <option value="true" ${s.enabled ? "selected" : ""}>ja</option>
-          <option value="false" ${!s.enabled ? "selected" : ""}>nein</option>
-        </select></div>
-    </div>
-    <p class="small-note">Die Absicherung des Abgangs ist die Installationssicherung
-      des Kabels zur Station – getrennt vom technischen Max-Strom der Wallbox selbst.
-      Leer lassen, wenn keine gesonderte Abgangssicherung bekannt ist.</p>
+    <p class="small-note">Eine Ladestation ist nur die Modbus-Verbindung. Priorität,
+      Phasen, Verteiler, PV-Überschuss und Zeitpläne werden je Ladepunkt eingestellt
+      (siehe „+ Ladepunkt" an der Station).</p>
     <div class="row" style="justify-content:flex-end;margin-top:8px">
       <button class="btn secondary" onclick="document.getElementById('station-dialog').close()">Abbrechen</button>
       <button class="btn" onclick="saveStation(${id || 0})">Speichern</button>
@@ -207,11 +210,7 @@ async function saveStation(id) {
   const body = {
     name: val("st-name"), location: val("st-loc") || null,
     ip_address: val("st-ip"), tcp_port: +val("st-port"), unit_id: +val("st-unit"),
-    profile_id: +val("st-profile"), phase_config: val("st-phase"),
-    priority: +val("st-prio"), min_current_a: +val("st-min"), max_current_a: +val("st-max"),
-    safe_state: val("st-safe"), enabled: val("st-enabled") === "true",
-    distribution_board_id: val("st-board") ? +val("st-board") : null,
-    circuit_breaker_a: val("st-breaker") ? +val("st-breaker") : null,
+    profile_id: +val("st-profile"),
   };
   try {
     await api(id ? "/api/stations/" + id : "/api/stations",
@@ -223,7 +222,7 @@ async function saveStation(id) {
 }
 
 async function deleteStation(id) {
-  if (!confirm("Station wirklich löschen?")) return;
+  if (!confirm("Station (inkl. all ihrer Ladepunkte) wirklich löschen?")) return;
   try { await api("/api/stations/" + id, { method: "DELETE" }); toast("Gelöscht."); loadStations(); }
   catch (e) { toast(e.message, true); }
 }
@@ -241,6 +240,137 @@ async function testStation(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+// --- Ladepunkte (steuerbare Einheit, ggf. zwei je Station) -----------------
+
+function scheduleRow(sch) {
+  sch = sch || { weekdays_mask: 0b1111111, start_time: "22:00", end_time: "06:00" };
+  const days = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+  const checks = days.map((d, i) => `
+    <label><input type="checkbox" class="sch-day" data-bit="${i}" ${(sch.weekdays_mask & (1 << i)) ? "checked" : ""}> ${d}</label>
+  `).join("");
+  return `
+    <div class="schedule-row">
+      <div class="weekday-picker">${checks}</div>
+      <input class="sch-start" type="time" value="${(sch.start_time || "22:00").slice(0, 5)}" style="width:130px">
+      <span class="muted">bis</span>
+      <input class="sch-end" type="time" value="${(sch.end_time || "06:00").slice(0, 5)}" style="width:130px">
+      <button class="btn small danger" onclick="this.closest('.schedule-row').remove()">×</button>
+    </div>`;
+}
+
+function collectSchedules() {
+  return [...document.querySelectorAll("#sch-list .schedule-row")].map((row) => {
+    let mask = 0;
+    row.querySelectorAll(".sch-day").forEach((cb) => { if (cb.checked) mask |= (1 << +cb.dataset.bit); });
+    const start = row.querySelector(".sch-start").value || "00:00";
+    const end = row.querySelector(".sch-end").value || "00:00";
+    return { weekdays_mask: mask, start_time: start + ":00", end_time: end + ":00" };
+  }).filter((s) => s.weekdays_mask > 0);
+}
+
+async function openChargePoint(id, presetStationId) {
+  if (!stationCache.length) stationCache = await api("/api/stations");
+  if (!stationCache.length) { toast("Bitte zuerst eine Ladestation anlegen.", true); return; }
+  if (!boardCache.length) boardCache = await api("/api/boards");
+  const cp = id ? await api("/api/charge-points/" + id) : {
+    station_id: presetStationId || stationCache[0].id, connector_suffix: "", name: "",
+    phase_config: "3p", priority: 0, max_current_a: 32, min_current_a: 6,
+    distribution_board_id: null, circuit_breaker_a: null, enabled: true,
+    safe_state: "block", pv_surplus_only: false, schedules: [],
+  };
+  const stationOpts = stationCache.map((s) =>
+    `<option value="${s.id}" ${s.id === cp.station_id ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+  const boardOpts = boardCache.map((b) =>
+    `<option value="${b.id}" ${b.id === cp.distribution_board_id ? "selected" : ""}>${esc(b.name)}</option>`).join("");
+  const dlg = document.getElementById("chargepoint-dialog");
+  dlg.innerHTML = `
+    <h2>${id ? "Ladepunkt bearbeiten" : "Neuer Ladepunkt"}</h2>
+    <div class="row">
+      <div class="field"><label>Station</label><select id="cp-station">${stationOpts}</select></div>
+      <div class="field"><label>Name</label><input id="cp-name" value="${esc(cp.name)}"></div>
+      <div class="field"><label>Connector-Suffix</label>
+        <input id="cp-suffix" value="${esc(cp.connector_suffix)}" placeholder="z. B. _1 bei Doppel-Wallbox"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Phasenanschluss</label>
+        <select id="cp-phase">
+          ${["3p", "1p_l1", "1p_l2", "1p_l3"].map((p) =>
+            `<option value="${p}" ${p === cp.phase_config ? "selected" : ""}>${p}</option>`).join("")}
+        </select></div>
+      <div class="field"><label>Priorität</label><input id="cp-prio" type="number" value="${cp.priority}"></div>
+      <div class="field"><label>Aktiv</label>
+        <select id="cp-enabled">
+          <option value="true" ${cp.enabled ? "selected" : ""}>ja</option>
+          <option value="false" ${!cp.enabled ? "selected" : ""}>nein</option>
+        </select></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Min-Strom (A)</label><input id="cp-min" type="number" step="0.1" value="${cp.min_current_a}"></div>
+      <div class="field"><label>Max-Strom (A)</label><input id="cp-max" type="number" step="0.1" value="${cp.max_current_a}"></div>
+      <div class="field"><label>Fail-Safe</label>
+        <select id="cp-safe">
+          <option value="block" ${cp.safe_state === "block" ? "selected" : ""}>Sperren (0 A)</option>
+          <option value="min_current" ${cp.safe_state === "min_current" ? "selected" : ""}>Minimalstrom</option>
+        </select></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Verteiler (Abgang hängt an)</label><select id="cp-board">${boardOpts}</select></div>
+      <div class="field"><label>Absicherung Abgang (A)</label>
+        <input id="cp-breaker" type="number" step="0.1" value="${cp.circuit_breaker_a ?? ""}" placeholder="optional"></div>
+      <div class="field"><label>PV-Überschussladen</label>
+        <select id="cp-pv">
+          <option value="false" ${!cp.pv_surplus_only ? "selected" : ""}>nein (normal laden)</option>
+          <option value="true" ${cp.pv_surplus_only ? "selected" : ""}>ja (nur mit PV-Überschuss)</option>
+        </select></div>
+    </div>
+    <p class="small-note">Connector-Suffix nur bei Doppel-Wallboxen ausfüllen (z. B.
+      „_1"/„_2") – muss zu den Register-Keys im Geräteprofil passen (z. B.
+      <code>set_current_1</code>). PV-Überschussladen lädt nachrangig nur mit
+      überschüssiger Solarerzeugung; erfordert dynamisches Lastmanagement mit
+      Netzanschlusszähler in den Einstellungen.</p>
+
+    <label>Zeitpläne (wiederkehrende Sperrfenster)</label>
+    <div id="sch-list">${(cp.schedules || []).map(scheduleRow).join("")}</div>
+    <div class="row" style="margin-top:6px">
+      <button class="btn small secondary" onclick="document.getElementById('sch-list').insertAdjacentHTML('beforeend', scheduleRow())">+ Zeitfenster</button>
+    </div>
+    <p class="small-note">Innerhalb eines Zeitfensters wird der Ladepunkt automatisch
+      gesperrt (wie manuell deaktiviert). Fenster über Mitternacht (z. B. 22:00–06:00)
+      sind möglich.</p>
+
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button class="btn secondary" onclick="document.getElementById('chargepoint-dialog').close()">Abbrechen</button>
+      <button class="btn" onclick="saveChargePoint(${id || 0})">Speichern</button>
+    </div>`;
+  dlg.showModal();
+}
+
+async function saveChargePoint(id) {
+  const body = {
+    station_id: +val("cp-station"), connector_suffix: val("cp-suffix").trim(),
+    name: val("cp-name"), phase_config: val("cp-phase"), priority: +val("cp-prio"),
+    min_current_a: +val("cp-min"), max_current_a: +val("cp-max"),
+    safe_state: val("cp-safe"), enabled: val("cp-enabled") === "true",
+    distribution_board_id: val("cp-board") ? +val("cp-board") : null,
+    circuit_breaker_a: val("cp-breaker") ? +val("cp-breaker") : null,
+    pv_surplus_only: val("cp-pv") === "true",
+    schedules: collectSchedules(),
+  };
+  try {
+    await api(id ? "/api/charge-points/" + id : "/api/charge-points",
+      { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    document.getElementById("chargepoint-dialog").close();
+    toast("Ladepunkt gespeichert.");
+    loadStations();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteChargePoint(id) {
+  if (!confirm("Ladepunkt wirklich löschen?")) return;
+  try { await api("/api/charge-points/" + id, { method: "DELETE" }); toast("Gelöscht."); loadStations(); }
+  catch (e) { toast(e.message, true); }
+}
+
 // --- Verteilung (Hauptverteilung / Unterverteilung / Abgänge) -------------
 
 function renderBoardNode(node) {
@@ -256,7 +386,7 @@ function renderBoardNode(node) {
 
   const stationRows = node.stations.map((s) => `
     <div class="station-row">
-      <span>${esc(s.name)}${s.circuit_breaker_a != null ? ` <span class="muted">(Abgang ${nf.format(s.circuit_breaker_a)} A)</span>` : ""}</span>
+      <span>${esc(s.name)}${s.pv_surplus_only ? ' <span class="badge pv">PV</span>' : ""}${s.circuit_breaker_a != null ? ` <span class="muted">(Abgang ${nf.format(s.circuit_breaker_a)} A)</span>` : ""}</span>
       <span>${s.online
         ? (s.setpoint_a != null ? nf.format(s.setpoint_a) + " A" : '<span class="badge ok">online</span>')
         : '<span class="badge err">offline</span>'}</span>
@@ -269,7 +399,7 @@ function renderBoardNode(node) {
       <div class="tree-header">
         <div>
           <span class="tree-title">${esc(node.name)}</span>
-          <span class="tree-fuse">Absicherung ${nf.format(node.incoming_fuse_a)} A${node.location ? " · " + esc(node.location) : ""}</span>
+          <span class="tree-fuse">Absicherung ${nf.format(node.incoming_fuse_a)} A${node.location ? " · " + esc(node.location) : ""}${node.strategy ? ` · Strategie: ${STRATEGY_TXT[node.strategy] || node.strategy}` : ""}</span>
         </div>
         <div>
           <button class="btn small secondary" onclick="openBoard(0, ${node.id})">+ Unterverteilung</button>
@@ -294,7 +424,7 @@ async function openBoard(id, presetParentId) {
   const rootId = boardCache.find((x) => x.parent_board_id === null)?.id ?? null;
   const b = id ? await api("/api/boards/" + id) : {
     name: "", parent_board_id: presetParentId ?? rootId,
-    incoming_fuse_a: 35, priority: 0, location: "", notes: "",
+    incoming_fuse_a: 35, priority: 0, strategy: null, location: "", notes: "",
   };
   const isRoot = id && b.parent_board_id === null;
   const parentOpts = boardCache
@@ -311,6 +441,13 @@ async function openBoard(id, presetParentId) {
     <div class="row">
       <div class="field"><label>Absicherung (A, je Phase)</label><input id="b-fuse" type="number" step="0.1" value="${b.incoming_fuse_a}"></div>
       <div class="field"><label>Priorität</label><input id="b-prio" type="number" value="${b.priority}"></div>
+      <div class="field"><label>Verteilstrategie</label>
+        <select id="b-strategy">
+          <option value="" ${!b.strategy ? "selected" : ""}>Erben (übergeordnet/global)</option>
+          <option value="equal" ${b.strategy === "equal" ? "selected" : ""}>Gleichmäßig</option>
+          <option value="priority" ${b.strategy === "priority" ? "selected" : ""}>Priorität</option>
+          <option value="fifo" ${b.strategy === "fifo" ? "selected" : ""}>FIFO</option>
+        </select></div>
       <div class="field"><label>Standort</label><input id="b-loc" value="${esc(b.location || "")}"></div>
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:8px">
@@ -325,6 +462,7 @@ async function saveBoard(id, isRoot) {
     name: val("b-name"),
     parent_board_id: isRoot ? null : +val("b-parent"),
     incoming_fuse_a: +val("b-fuse"), priority: +val("b-prio"),
+    strategy: val("b-strategy") || null,
     location: val("b-loc") || null,
   };
   try {

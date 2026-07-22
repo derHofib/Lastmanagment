@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import time as dt_time
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.base import (
@@ -106,6 +108,9 @@ class DistributionBoardBase(BaseModel):
     parent_board_id: int | None = None
     incoming_fuse_a: float = Field(63.0, ge=0)
     priority: int = 0
+    # Verteilstrategie für DIESEN Verteiler-Zweig. None = erbt vom
+    # übergeordneten Verteiler bzw. zuletzt von der globalen Strategie.
+    strategy: DistributionStrategy | None = None
     location: str | None = Field(None, max_length=120)
     notes: str | None = Field(None, max_length=1000)
 
@@ -124,7 +129,7 @@ class DistributionBoardRead(DistributionBoardBase):
 
 
 class BoardTreeStation(BaseModel):
-    """Eine Ladestation als Blatt im Verteilungsbaum, inkl. Live-Auslastung."""
+    """Ein Ladepunkt als Blatt im Verteilungsbaum, inkl. Live-Auslastung."""
 
     id: int
     name: str
@@ -132,6 +137,7 @@ class BoardTreeStation(BaseModel):
     max_current_a: float
     online: bool = False
     setpoint_a: float | None = None
+    pv_surplus_only: bool = False
 
 
 class BoardTreeNode(BaseModel):
@@ -141,6 +147,7 @@ class BoardTreeNode(BaseModel):
     name: str
     incoming_fuse_a: float
     priority: int
+    strategy: DistributionStrategy | None = None
     location: str | None = None
     # Aktuelle Auslastung je Phase innerhalb des gesamten Teilbaums
     load_a: dict[str, float] = Field(default_factory=dict)
@@ -151,7 +158,12 @@ class BoardTreeNode(BaseModel):
 BoardTreeNode.model_rebuild()
 
 
-# --- Ladestation -----------------------------------------------------------
+# --- Ladestation (physische Modbus-Verbindung) -----------------------------
+#
+# Eine Ladestation ist nur noch die physische Verbindung (IP/Port/Unit-ID +
+# Profil). Die steuerbaren/zuteilbaren Ladepunkte (Priorität, Phasen,
+# Min/Max-Strom, Verteiler, Zeitpläne, PV-Überschuss, ...) sind eigene
+# ChargePoint-Einträge (siehe unten) – bei Doppel-Wallboxen zwei je Station.
 
 class ChargingStationBase(BaseModel):
     name: str = Field(..., max_length=120)
@@ -160,24 +172,6 @@ class ChargingStationBase(BaseModel):
     tcp_port: int = Field(502, ge=1, le=65535)
     unit_id: int = Field(1, ge=0, le=255)
     profile_id: int
-    phase_config: PhaseConfig = PhaseConfig.P3
-    priority: int = 0
-    max_current_a: float = Field(32.0, ge=0)
-    min_current_a: float = Field(6.0, ge=0)
-    enabled: bool = True
-    safe_state: SafeState = SafeState.BLOCK
-    # An welchem Verteiler hängt der Abgang zu dieser Station? None = Wurzel
-    # (Hauptverteilung).
-    distribution_board_id: int | None = None
-    # Absicherung DES ABGANGS zur Ladestation (Installationssicherung),
-    # separat von max_current_a (technische Grenze der Wallbox selbst).
-    circuit_breaker_a: float | None = Field(None, ge=0)
-
-    @model_validator(mode="after")
-    def _check_currents(self):
-        if self.min_current_a > self.max_current_a:
-            raise ValueError("min_current_a darf nicht größer als max_current_a sein")
-        return self
 
 
 class ChargingStationCreate(ChargingStationBase):
@@ -191,6 +185,69 @@ class ChargingStationUpdate(ChargingStationBase):
 class ChargingStationRead(ChargingStationBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
+
+
+# --- Zeitsteuerung (wiederkehrende Sperrfenster je Ladepunkt) --------------
+
+class ChargeScheduleBase(BaseModel):
+    # Bit 0 = Montag ... Bit 6 = Sonntag (1 = Fenster gilt an diesem Tag)
+    weekdays_mask: int = Field(0b1111111, ge=0, le=127)
+    start_time: dt_time
+    end_time: dt_time
+
+
+class ChargeScheduleCreate(ChargeScheduleBase):
+    pass
+
+
+class ChargeScheduleRead(ChargeScheduleBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+
+
+# --- Ladepunkt (steuerbare/zuteilbare Einheit einer Ladestation) -----------
+
+class ChargePointBase(BaseModel):
+    station_id: int
+    # "" für Einzel-Ladepunkt-Stationen, "_1"/"_2" ... für Doppel-Wallboxen –
+    # bestimmt, welche Register im Profil zu diesem Ladepunkt gehören.
+    connector_suffix: str = Field("", max_length=10)
+    name: str = Field(..., max_length=120)
+    phase_config: PhaseConfig = PhaseConfig.P3
+    priority: int = 0
+    max_current_a: float = Field(32.0, ge=0)
+    min_current_a: float = Field(6.0, ge=0)
+    # An welchem Verteiler hängt der Abgang zu diesem Ladepunkt? None = Wurzel
+    # (Hauptverteilung).
+    distribution_board_id: int | None = None
+    # Absicherung DES ABGANGS (Installationssicherung), separat von
+    # max_current_a (technische Grenze der Wallbox selbst).
+    circuit_breaker_a: float | None = Field(None, ge=0)
+    enabled: bool = True
+    safe_state: SafeState = SafeState.BLOCK
+    # PV-Überschussladen: lädt nachrangig ausschließlich mit PV-Überschuss
+    # (erfordert dynamisches Lastmanagement + Netzanschlusszähler).
+    pv_surplus_only: bool = False
+
+    @model_validator(mode="after")
+    def _check_currents(self):
+        if self.min_current_a > self.max_current_a:
+            raise ValueError("min_current_a darf nicht größer als max_current_a sein")
+        return self
+
+
+class ChargePointCreate(ChargePointBase):
+    schedules: list[ChargeScheduleCreate] = Field(default_factory=list)
+
+
+class ChargePointUpdate(ChargePointBase):
+    schedules: list[ChargeScheduleCreate] | None = None
+
+
+class ChargePointRead(ChargePointBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    schedules: list[ChargeScheduleRead] = Field(default_factory=list)
 
 
 # --- Globale Konfiguration -------------------------------------------------
@@ -239,8 +296,20 @@ class GlobalConfigUpdate(BaseModel):
 
 # --- Live-/Status-Antworten ------------------------------------------------
 
-class StationLive(BaseModel):
+class ConnectionTestResult(BaseModel):
+    """Ergebnis eines Verbindungs-/Profiltests einer Ladestation (rohe,
+    unskopierte Registerwerte – ggf. mit Connector-Suffix bei Doppel-
+    Wallboxen, siehe app.modbus.runtime.ChargePointSpec)."""
+
     station_id: int
+    name: str
+    online: bool
+    values: dict = Field(default_factory=dict)
+    error: str | None = None
+
+
+class ChargePointLive(BaseModel):
+    charge_point_id: int
     name: str
     online: bool
     values: dict = Field(default_factory=dict)
@@ -256,7 +325,7 @@ class SystemStatus(BaseModel):
     en14a_active: bool
     phase_load_a: dict[str, float]
     phase_available_a: dict[str, float]
-    active_stations: int
-    total_stations: int
+    active_charge_points: int
+    total_charge_points: int
     last_cycle: str | None = None
-    stations: list[StationLive] = Field(default_factory=list)
+    charge_points: list[ChargePointLive] = Field(default_factory=list)

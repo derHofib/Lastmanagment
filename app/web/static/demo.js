@@ -3,8 +3,13 @@
  * Demo-Modus (nur GitHub Pages): Es gibt kein Backend, daher wird window.fetch
  * so gepatcht, dass alle /api/...-Aufrufe im Browser mit simulierten, aber
  * realistischen Daten beantwortet werden. Der Zustand (Profile, Stationen,
- * Konfiguration) wird in localStorage gehalten, sodass Anlegen/Bearbeiten/
- * Löschen wie in der echten Anwendung funktioniert.
+ * Ladepunkte, Verteiler, Konfiguration) wird in localStorage gehalten, sodass
+ * Anlegen/Bearbeiten/Löschen wie in der echten Anwendung funktioniert.
+ *
+ * Vereinfacht gegenüber der echten Engine (app/loadmanager/engine.py):
+ * keine echte hierarchische Absicherungs-Durchsetzung je Verteilerknoten,
+ * kein echter Zwei-Lauf-PV-Algorithmus – nur plausible, aber nicht
+ * physikalisch exakte Werte für die UI-Demo.
  *
  * Wird nur aktiv, wenn window.LM_DEMO === true (siehe config.js). Im echten
  * Betrieb (FastAPI) bleibt fetch unverändert.
@@ -12,7 +17,7 @@
 (function () {
   if (!window.LM_DEMO) return;
 
-  const LS_KEY = "lm_demo_state_v3";
+  const LS_KEY = "lm_demo_state_v4";
   const PHASES = ["L1", "L2", "L3"];
 
   // --- Seed-Daten (entspricht examples/beispiel_wallbox.json) --------------
@@ -30,11 +35,13 @@
 
     return {
       seqProfile: 2,
-      seqStation: 3,
+      seqStation: 2,
+      seqChargePoint: 3,
+      seqSchedule: 1,
       seqBoard: 3,
       boards: [
-        { id: 1, name: "Hauptverteilung", parent_board_id: null, incoming_fuse_a: 63, priority: 0, location: "Hausanschluss", notes: null },
-        { id: 2, name: "UV Garage", parent_board_id: 1, incoming_fuse_a: 35, priority: 0, location: "Carport", notes: null },
+        { id: 1, name: "Hauptverteilung", parent_board_id: null, incoming_fuse_a: 63, priority: 0, strategy: null, location: "Hausanschluss", notes: null },
+        { id: 2, name: "UV Garage", parent_board_id: 1, incoming_fuse_a: 35, priority: 0, strategy: null, location: "Carport", notes: null },
       ],
       config: {
         id: 1, grid_limit_current_a: 32, management_mode: "static",
@@ -50,8 +57,11 @@
         registers,
       }],
       stations: [
-        { id: 1, name: "Garage links", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "block", distribution_board_id: 2, circuit_breaker_a: 16 },
-        { id: 2, name: "Garage rechts", location: "Carport", ip_address: "192.168.1.51", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 1, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "min_current", distribution_board_id: 2, circuit_breaker_a: 16 },
+        { id: 1, name: "Garage", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1 },
+      ],
+      chargePoints: [
+        { id: 1, station_id: 1, connector_suffix: "", name: "Ladepunkt links", phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, distribution_board_id: 2, circuit_breaker_a: 16, enabled: true, safe_state: "block", pv_surplus_only: false, schedules: [] },
+        { id: 2, station_id: 1, connector_suffix: "_2", name: "Ladepunkt rechts", phase_config: "3p", priority: 1, max_current_a: 32, min_current_a: 6, distribution_board_id: 2, circuit_breaker_a: 16, enabled: true, safe_state: "min_current", pv_surplus_only: false, schedules: [] },
       ],
     };
   }
@@ -70,68 +80,108 @@
   }
 
   let state = load();
-  const energyRuntime = {}; // station_id -> kWh (nur zur Laufzeit hochzählen)
+  const energyRuntime = {}; // charge_point_id -> kWh (nur zur Laufzeit hochzählen)
 
-  // --- Vereinfachte Verteil-Logik (spiegelt engine.py grob) ----------------
+  // --- Zeitplan-Prüfung (spiegelt app.loadmanager.schedule.is_blocked) -----
+  function isBlocked(schedules, now) {
+    const weekday = (now.getDay() + 6) % 7; // JS: So=0..Sa=6 -> Mo=0..So=6
+    const prevWeekday = (weekday + 6) % 7;
+    const current = now.getHours() * 60 + now.getMinutes();
+    const toMinutes = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+    for (const s of schedules || []) {
+      const start = toMinutes(s.start_time), end = toMinutes(s.end_time);
+      if (start <= end) {
+        if ((s.weekdays_mask & (1 << weekday)) && current >= start && current < end) return true;
+      } else {
+        if ((s.weekdays_mask & (1 << weekday)) && current >= start) return true;
+        if ((s.weekdays_mask & (1 << prevWeekday)) && current < end) return true;
+      }
+    }
+    return false;
+  }
+
+  // --- Vereinfachte Verteil-Logik (spiegelt engine.py grob, ohne echte
+  // Hierarchie-Durchsetzung je Verteilerknoten) -----------------------------
   function phasesOf(cfg) {
     return { "1p_l1": ["L1"], "1p_l2": ["L2"], "1p_l3": ["L3"], "3p": ["L1", "L2", "L3"] }[cfg];
+  }
+
+  function waterFill(items, limit) {
+    // items: [{id, phases, min_current_a, max_current_a}]
+    const targets = {};
+    items.forEach((s) => (targets[s.id] = 0));
+    let pool = items.slice();
+    for (let iter = 0; iter < pool.length + 1; iter++) {
+      const remaining = { L1: limit, L2: limit, L3: limit };
+      const countOnPhase = { L1: 0, L2: 0, L3: 0 };
+      pool.forEach((s) => phasesOf(s.phase_config).forEach((p) => countOnPhase[p]++));
+      const round = {};
+      pool.forEach((s) => {
+        const ph = phasesOf(s.phase_config);
+        let share = Math.min(...ph.map((p) => (countOnPhase[p] ? remaining[p] / countOnPhase[p] : limit)));
+        round[s.id] = Math.min(s.max_current_a, share);
+      });
+      const below = pool.filter((s) => round[s.id] < s.min_current_a - 1e-6);
+      if (below.length === 0) {
+        pool.forEach((s) => (targets[s.id] = Math.floor(round[s.id] + 1e-6)));
+        break;
+      }
+      below.sort((a, b) => round[a.id] - round[b.id]);
+      pool = pool.filter((s) => s.id !== below[0].id);
+      if (pool.length === 0) break;
+    }
+    return targets;
   }
 
   function allocate() {
     const cfg = state.config;
     let limit = cfg.grid_limit_current_a;
     if (cfg.en14a_enabled && cfg.en14a_active) limit = Math.min(limit, cfg.en14a_limit_current_a);
-    const active = state.stations.filter((s) => s.enabled);
-    const setpoints = {};
-    state.stations.forEach((s) => (setpoints[s.id] = 0));
+    const now = new Date();
 
-    // Iterativ: pro Phase gleichmäßig teilen, Minimalstrom-Regel anwenden
-    let pool = active.slice();
-    for (let iter = 0; iter < pool.length + 1; iter++) {
-      const remaining = { L1: limit, L2: limit, L3: limit };
-      const countOnPhase = { L1: 0, L2: 0, L3: 0 };
-      pool.forEach((s) => phasesOf(s.phase_config).forEach((p) => countOnPhase[p]++));
-      const targets = {};
-      pool.forEach((s) => {
-        const ph = phasesOf(s.phase_config);
-        let share = Math.min(...ph.map((p) => (countOnPhase[p] ? remaining[p] / countOnPhase[p] : limit)));
-        targets[s.id] = Math.min(s.max_current_a, share);
-      });
-      // Station unter Minimalstrom pausieren und neu verteilen
-      const below = pool.filter((s) => targets[s.id] < s.min_current_a - 1e-6);
-      if (below.length === 0) {
-        pool.forEach((s) => (setpoints[s.id] = Math.floor(targets[s.id] + 1e-6)));
-        break;
-      }
-      below.sort((a, b) => targets[a.id] - targets[b.id]);
-      pool = pool.filter((s) => s.id !== below[0].id);
-      if (pool.length === 0) break;
+    const eligible = state.chargePoints.filter((cp) => cp.enabled && !isBlocked(cp.schedules, now));
+    const gridCps = eligible.filter((cp) => !cp.pv_surplus_only);
+    const pvCps = eligible.filter((cp) => cp.pv_surplus_only);
+
+    const setpoints = {};
+    state.chargePoints.forEach((cp) => (setpoints[cp.id] = 0));
+    Object.assign(setpoints, waterFill(gridCps, limit));
+
+    // PV-Only: nur eine plausible Demo-Zuteilung, wenn dynamisches Lastmanagement
+    // aktiv ist (simulierter Überschuss) – sonst 0 A (konservativ, wie in der
+    // echten Anwendung ohne Überschussdaten).
+    if (cfg.management_mode === "dynamic" && cfg.dynamic_meter_enabled && pvCps.length) {
+      const simulatedSurplus = 12; // Demo-Fixwert
+      Object.assign(setpoints, waterFill(pvCps, simulatedSurplus));
+    } else {
+      pvCps.forEach((cp) => (setpoints[cp.id] = 0));
     }
-    return { setpoints, limit };
+
+    return { setpoints, limit, blockedIds: new Set(state.chargePoints.filter((cp) => cp.enabled && isBlocked(cp.schedules, now)).map((cp) => cp.id)) };
   }
 
   function buildStatusSnapshot() {
-    const { setpoints, limit } = allocate();
+    const { setpoints, limit, blockedIds } = allocate();
     const load = { L1: 0, L2: 0, L3: 0 };
-    const stations = state.stations.map((s) => {
-      const sp = setpoints[s.id] || 0;
-      const online = s.enabled; // im Demo sind aktivierte Stationen "online"
-      const ph = phasesOf(s.phase_config);
-      // Ist-Strom leicht schwankend um den Sollwert
+    const chargePoints = state.chargePoints.map((cp) => {
+      const sp = setpoints[cp.id] || 0;
+      const online = cp.enabled; // im Demo sind aktivierte Ladepunkte "online"
+      const ph = phasesOf(cp.phase_config);
       const ist = sp > 0 ? sp * (0.92 + Math.random() * 0.08) : 0;
       ph.forEach((p) => (load[p] += sp));
-      energyRuntime[s.id] = (energyRuntime[s.id] || 30 + s.id * 5) + ist * ph.length * 0.0003;
+      energyRuntime[cp.id] = (energyRuntime[cp.id] || 30 + cp.id * 5) + ist * ph.length * 0.0003;
+      const blocked = blockedIds.has(cp.id);
       const values = online ? {
         current_l1: ph.includes("L1") ? +ist.toFixed(1) : 0,
         current_l2: ph.includes("L2") ? +ist.toFixed(1) : 0,
         current_l3: ph.includes("L3") ? +ist.toFixed(1) : 0,
         active_power: Math.round(ist * ph.length * 230),
-        energy_total: +energyRuntime[s.id].toFixed(1),
+        energy_total: +energyRuntime[cp.id].toFixed(1),
         charge_status: sp > 0 ? 2 : 1,
-        charge_status_text: sp > 0 ? "Lädt" : "Fahrzeug verbunden",
+        charge_status_text: blocked ? "Zeitplan-Sperre" : (sp > 0 ? "Lädt" : "Fahrzeug verbunden"),
       } : {};
       return {
-        station_id: s.id, name: s.name, online, values,
+        charge_point_id: cp.id, name: cp.name, online, values,
         setpoint_a: online ? sp : null, error: online ? null : "deaktiviert",
       };
     });
@@ -144,10 +194,10 @@
       en14a_active: !!(cfg.en14a_enabled && cfg.en14a_active),
       phase_load_a: load,
       phase_available_a: { L1: limit, L2: limit, L3: limit },
-      active_stations: stations.filter((s) => s.online && s.setpoint_a > 0).length,
-      total_stations: state.stations.length,
+      active_charge_points: chargePoints.filter((cp) => cp.online && cp.setpoint_a > 0).length,
+      total_charge_points: state.chargePoints.length,
       last_cycle: new Date().toISOString(),
-      stations,
+      charge_points: chargePoints,
     };
   }
 
@@ -156,8 +206,8 @@
   // echte Anwendung (app/loadmanager/engine.allocate_tree) tut das) --------
   function buildBoardTree() {
     const snap = buildStatusSnapshot();
-    const liveByStation = {};
-    snap.stations.forEach((s) => (liveByStation[s.station_id] = s));
+    const liveByCp = {};
+    snap.charge_points.forEach((cp) => (liveByCp[cp.charge_point_id] = cp));
 
     const childrenOf = {};
     state.boards.forEach((b) => {
@@ -165,23 +215,24 @@
         (childrenOf[b.parent_board_id] = childrenOf[b.parent_board_id] || []).push(b);
       }
     });
-    const stationsOf = {};
-    state.stations.forEach((s) => {
-      const key = s.distribution_board_id ?? "root";
-      (stationsOf[key] = stationsOf[key] || []).push(s);
+    const cpsOf = {};
+    state.chargePoints.forEach((cp) => {
+      const key = cp.distribution_board_id ?? "root";
+      (cpsOf[key] = cpsOf[key] || []).push(cp);
     });
     const root = state.boards.find((b) => b.parent_board_id === null);
 
     function build(board) {
       const isRoot = board.parent_board_id === null;
-      const myStations = (stationsOf[board.id] || []).concat(isRoot ? (stationsOf["root"] || []) : []);
+      const myCps = (cpsOf[board.id] || []).concat(isRoot ? (cpsOf["root"] || []) : []);
       const load = { L1: 0, L2: 0, L3: 0 };
-      const stationNodes = myStations.map((s) => {
-        const live = liveByStation[s.id] || {};
-        if (live.online) phasesOf(s.phase_config).forEach((p) => (load[p] += live.setpoint_a || 0));
+      const cpNodes = myCps.map((cp) => {
+        const live = liveByCp[cp.id] || {};
+        if (live.online) phasesOf(cp.phase_config).forEach((p) => (load[p] += live.setpoint_a || 0));
         return {
-          id: s.id, name: s.name, circuit_breaker_a: s.circuit_breaker_a ?? null,
-          max_current_a: s.max_current_a, online: !!live.online, setpoint_a: live.setpoint_a ?? null,
+          id: cp.id, name: cp.name, circuit_breaker_a: cp.circuit_breaker_a ?? null,
+          max_current_a: cp.max_current_a, online: !!live.online, setpoint_a: live.setpoint_a ?? null,
+          pv_surplus_only: cp.pv_surplus_only,
         };
       });
       const childNodes = (childrenOf[board.id] || []).map((c) => {
@@ -191,8 +242,8 @@
       });
       return {
         id: board.id, name: board.name, incoming_fuse_a: board.incoming_fuse_a,
-        priority: board.priority, location: board.location ?? null,
-        load_a: load, stations: stationNodes, children: childNodes,
+        priority: board.priority, strategy: board.strategy ?? null, location: board.location ?? null,
+        load_a: load, stations: cpNodes, children: childNodes,
       };
     }
     return build(root);
@@ -209,6 +260,9 @@
       id: i + 1, scale: 1, offset: 0, byte_order: null, word_order: null,
       unit: null, enum_map: null, writable_min: null, writable_max: null, ...r,
     }));
+  }
+  function withScheduleIds(schedules) {
+    return (schedules || []).map((s) => ({ id: state.seqSchedule++, ...s }));
   }
   function exportOf(p) {
     const out = {
@@ -274,8 +328,8 @@
           return err(409, "Die Hauptverteilung kann nicht gelöscht werden");
         if (state.boards.some((b) => b.parent_board_id === id))
           return err(409, "Verteiler hat noch Unterverteilungen");
-        if (state.stations.some((s) => s.distribution_board_id === id))
-          return err(409, "Verteiler hat noch zugewiesene Ladestationen");
+        if (state.chargePoints.some((cp) => cp.distribution_board_id === id))
+          return err(409, "Verteiler hat noch zugewiesene Ladepunkte");
         state.boards.splice(idx, 1);
         save(state);
         return json(null, 204);
@@ -315,7 +369,7 @@
       return p ? json(exportOf(p)) : err(404, "Geräteprofil nicht gefunden");
     }
 
-    // /api/stations ...
+    // /api/stations (nur Verbindung: IP/Port/Unit/Profil) ---------------------
     if (path === "/api/stations" && method === "GET") return json(state.stations);
     if (path === "/api/stations" && method === "POST") return createStation(body);
     if ((m = path.match(/^\/api\/stations\/(\d+)$/))) {
@@ -332,21 +386,49 @@
       }
       if (method === "DELETE") {
         state.stations.splice(idx, 1);
+        state.chargePoints = state.chargePoints.filter((cp) => cp.station_id !== id);
         save(state);
         return json(null, 204);
       }
     }
-    if ((m = path.match(/^\/api\/stations\/(\d+)\/live$/)) && method === "GET") {
-      const snap = buildStatusSnapshot().stations.find((s) => s.station_id === +m[1]);
-      return snap ? json(snap) : err(404, "Ladestation nicht gefunden");
-    }
     if ((m = path.match(/^\/api\/stations\/(\d+)\/test$/)) && method === "POST") {
-      const snap = buildStatusSnapshot().stations.find((s) => s.station_id === +m[1]);
-      if (!snap) return err(404, "Ladestation nicht gefunden");
-      return json({ station_id: snap.station_id, name: snap.name, online: true,
-        values: snap.values.charge_status != null ? snap.values : {
-          current_l1: 0, charge_status: 1, charge_status_text: "Fahrzeug verbunden" },
-        error: null });
+      const station = state.stations.find((s) => s.id === +m[1]);
+      if (!station) return err(404, "Ladestation nicht gefunden");
+      const cps = state.chargePoints.filter((cp) => cp.station_id === station.id);
+      const values = {};
+      cps.forEach((cp) => {
+        values["current_l1" + cp.connector_suffix] = 0;
+        values["charge_status" + cp.connector_suffix] = 1;
+        values["charge_status" + cp.connector_suffix + "_text"] = "Fahrzeug verbunden";
+      });
+      return json({ station_id: station.id, name: station.name, online: true, values, error: null });
+    }
+
+    // /api/charge-points --------------------------------------------------
+    if (path === "/api/charge-points" && method === "GET") return json(state.chargePoints);
+    if (path === "/api/charge-points" && method === "POST") return createChargePoint(body);
+    if ((m = path.match(/^\/api\/charge-points\/(\d+)$/))) {
+      const id = +m[1];
+      const idx = state.chargePoints.findIndex((cp) => cp.id === id);
+      if (idx < 0) return err(404, "Ladepunkt nicht gefunden");
+      if (method === "GET") return json(state.chargePoints[idx]);
+      if (method === "PUT") {
+        if (!state.stations.some((s) => s.id === body.station_id))
+          return err(400, "Ladestation existiert nicht");
+        const schedules = body.schedules ? withScheduleIds(body.schedules) : state.chargePoints[idx].schedules;
+        state.chargePoints[idx] = { id, ...body, schedules };
+        save(state);
+        return json(state.chargePoints[idx]);
+      }
+      if (method === "DELETE") {
+        state.chargePoints.splice(idx, 1);
+        save(state);
+        return json(null, 204);
+      }
+    }
+    if ((m = path.match(/^\/api\/charge-points\/(\d+)\/live$/)) && method === "GET") {
+      const snap = buildStatusSnapshot().charge_points.find((cp) => cp.charge_point_id === +m[1]);
+      return snap ? json(snap) : err(404, "Ladepunkt nicht gefunden");
     }
 
     return err(404, "Demo: unbekannter Endpunkt " + path);
@@ -382,6 +464,14 @@
     state.stations.push(s);
     save(state);
     return json(s, 201);
+  }
+  function createChargePoint(body) {
+    if (!state.stations.some((s) => s.id === body.station_id))
+      return err(400, "Ladestation existiert nicht");
+    const cp = { id: state.seqChargePoint++, ...body, schedules: withScheduleIds(body.schedules) };
+    state.chargePoints.push(cp);
+    save(state);
+    return json(cp, 201);
   }
 
   // --- fetch patchen -------------------------------------------------------

@@ -53,17 +53,21 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_new_columns()
+    _migrate_charge_points()
 
 
 # Leichtgewichtiger Kompatibilitäts-Check ohne volles Migrationsframework:
 # create_all() legt fehlende TABELLEN an, ergänzt aber keine SPALTEN an
 # bereits existierenden Tabellen. Diese Spalten kamen nach dem ersten Release
-# hinzu (Verteilungshierarchie) und müssen bei bestehenden SQLite-Dateien
-# nachträglich ergänzt werden.
+# hinzu (Verteilungshierarchie / Verteiler-Strategie) und müssen bei
+# bestehenden SQLite-Dateien nachträglich ergänzt werden.
 _NEW_COLUMNS = {
     "charging_stations": [
         ("distribution_board_id", "INTEGER REFERENCES distribution_boards(id)"),
         ("circuit_breaker_a", "FLOAT"),
+    ],
+    "distribution_boards": [
+        ("strategy", "VARCHAR"),
     ],
 }
 
@@ -77,6 +81,42 @@ def _ensure_new_columns() -> None:
             for name, ddl_type in columns:
                 if name not in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
+        conn.commit()
+
+
+# Datenmigration: ChargingStation vermischte früher physische Verbindung und
+# Regel-Parameter eines einzelnen Ladepunkts; seit der Ladepunkt-Trennung
+# leben Priorität/Phasen/Min-Max-Strom/Verteiler/Absicherung/Fail-Safe in
+# einer eigenen ChargePoint-Zeile. Bestehende Stationen bekommen hier
+# automatisch genau einen ChargePoint (connector_suffix="") mit den alten
+# Werten. Idempotent (nur Stationen ohne vorhandenen ChargePoint) und
+# gefahrlos: Falls die alten Spalten nicht mehr existieren (frische
+# Installation), ist nichts zu migrieren.
+_LEGACY_STATION_COLUMNS = {
+    "phase_config", "priority", "max_current_a", "min_current_a",
+    "distribution_board_id", "circuit_breaker_a", "enabled", "safe_state",
+}
+
+
+def _migrate_charge_points() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(charging_stations)")}
+        if not _LEGACY_STATION_COLUMNS.issubset(existing):
+            return
+        conn.exec_driver_sql("""
+            INSERT INTO charge_points (
+                station_id, connector_suffix, name, phase_config, priority,
+                max_current_a, min_current_a, distribution_board_id,
+                circuit_breaker_a, enabled, safe_state, pv_surplus_only
+            )
+            SELECT cs.id, '', cs.name, cs.phase_config, cs.priority,
+                   cs.max_current_a, cs.min_current_a, cs.distribution_board_id,
+                   cs.circuit_breaker_a, cs.enabled, cs.safe_state, 0
+            FROM charging_stations cs
+            WHERE cs.id NOT IN (SELECT station_id FROM charge_points)
+        """)
         conn.commit()
 
 

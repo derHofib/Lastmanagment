@@ -11,7 +11,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import boards_router, config_router, profiles_router, stations_router, status_router
+from app.api import (
+    boards_router,
+    charge_points_router,
+    config_router,
+    profiles_router,
+    stations_router,
+    status_router,
+)
 from app.db import init_db
 from app.loadmanager.loop import service
 from app.logging_config import setup_logging
@@ -44,6 +51,7 @@ app = FastAPI(
 
 app.include_router(profiles_router)
 app.include_router(stations_router)
+app.include_router(charge_points_router)
 app.include_router(boards_router)
 app.include_router(config_router)
 app.include_router(status_router)

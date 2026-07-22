@@ -39,11 +39,16 @@ class BoardNode:
     (``children``) werden bei der Zuteilung wie Geschwister behandelt – ein
     Kind-Verteiler tritt dabei als virtuelle 3-phasige Station auf (siehe
     :func:`allocate_tree`), begrenzt durch seine eigene ``fuse_a``.
+
+    ``strategy``: Verteilstrategie für diesen Knoten. ``None`` = erbt vom
+    übergeordneten Verteiler (kaskadierend) bzw. zuletzt von der an
+    :func:`allocate_tree` übergebenen Standard-Strategie.
     """
 
     id: int
     fuse_a: float
     priority: int = 0
+    strategy: DistributionStrategy | None = None
     children: tuple["BoardNode", ...] = ()
     stations: tuple[AllocStation, ...] = ()
 
@@ -190,7 +195,7 @@ def allocate(
 def allocate_tree(
     root: BoardNode,
     root_capacity: dict[str, float],
-    strategy: DistributionStrategy,
+    default_strategy: DistributionStrategy,
     floor_amps: bool = True,
 ) -> dict[int, float]:
     """Verteilt rekursiv top-down über die Verteilungshierarchie.
@@ -203,6 +208,11 @@ def allocate_tree(
     ihm zugeteilt wird, reicht er anschließend als eigene Kapazität an
     seinen Teilbaum weiter.
 
+    Verteilstrategie kaskadiert: ``node.strategy`` überschreibt für den
+    Knoten UND seinen gesamten Teilbaum die von seinem Elternteil geerbte
+    Strategie (``default_strategy`` gilt an der Wurzel, falls diese kein
+    eigenes ``strategy`` gesetzt hat).
+
     Ohne Unterverteiler (nur Wurzel mit direkt angeschlossenen Stationen)
     reduziert sich das auf einen einzigen ``allocate()``-Aufruf – identisches
     Verhalten wie vorher.
@@ -213,7 +223,8 @@ def allocate_tree(
     """
     result: dict[int, float] = {}
 
-    def recurse(node: BoardNode, capacity: dict[str, float]) -> None:
+    def recurse(node: BoardNode, capacity: dict[str, float], inherited_strategy: DistributionStrategy) -> None:
+        effective_strategy = node.strategy or inherited_strategy
         virtual_children = [
             AllocStation(
                 id=-child.id,
@@ -225,16 +236,68 @@ def allocate_tree(
             for child in node.children
         ]
         combined = list(node.stations) + virtual_children
-        targets = allocate(combined, capacity, strategy, floor_amps=floor_amps)
+        targets = allocate(combined, capacity, effective_strategy, floor_amps=floor_amps)
 
         for station in node.stations:
             result[station.id] = targets[station.id]
         for child in node.children:
             given = targets[-child.id]
-            recurse(child, {p: given for p in PHASES})
+            recurse(child, {p: given for p in PHASES}, effective_strategy)
 
-    recurse(root, root_capacity)
+    recurse(root, root_capacity, default_strategy)
     return result
+
+
+def subtree_totals(node: BoardNode, assignment: dict[int, float]) -> dict[str, float]:
+    """Summiert die zugeteilten Ströme je Phase über den GESAMTEN Teilbaum
+    eines Knotens (eigene Stationen + rekursiv alle Kind-Verteiler).
+
+    Dient sowohl der Verifikation (Grenzwert-Garantie an jedem Knoten) als
+    auch der Berechnung der Rest-Absicherung für einen zweiten,
+    nachrangigen Verteilungslauf (siehe :func:`remaining_capacity_tree`).
+    """
+    totals = {p: 0.0 for p in PHASES}
+    for st in node.stations:
+        v = assignment.get(st.id, 0.0)
+        for p in st.phases:
+            totals[p] += v
+    for child in node.children:
+        child_totals = subtree_totals(child, assignment)
+        for p in PHASES:
+            totals[p] += child_totals[p]
+    return totals
+
+
+def remaining_capacity_tree(
+    node: BoardNode,
+    used: dict[int, float],
+    stations_by_board: dict[int, tuple[AllocStation, ...]],
+) -> BoardNode:
+    """Baut einen Baum für einen zweiten, NACHRANGIGEN Verteilungslauf (z. B.
+    PV-Überschussladen): Jede Absicherung wird um die im ersten Lauf
+    (``used``, dessen Zuteilungsergebnis) bereits verbrauchte Kapazität
+    reduziert, und die Stationen jedes Knotens werden durch
+    ``stations_by_board`` ersetzt (die nachrangige Ladepunkt-Gruppe für
+    diesen Verteiler, z. B. PV-Only-Ladepunkte).
+
+    Die Absicherung ist ein einzelner Wert je Knoten (3-phasig symmetrisch,
+    siehe :class:`BoardNode`) – als "verbraucht" gilt konservativ die
+    höchstbelastete Phase des ersten Laufs.
+    """
+    children = tuple(
+        remaining_capacity_tree(c, used, stations_by_board) for c in node.children
+    )
+    consumed = subtree_totals(node, used)
+    used_scalar = max(consumed.values()) if consumed else 0.0
+    remaining_fuse = max(0.0, node.fuse_a - used_scalar)
+    return BoardNode(
+        id=node.id,
+        fuse_a=remaining_fuse,
+        priority=node.priority,
+        strategy=node.strategy,
+        children=children,
+        stations=stations_by_board.get(node.id, ()),
+    )
 
 
 def phase_totals(assignment: dict[int, float], stations: list[AllocStation]) -> dict[str, float]:

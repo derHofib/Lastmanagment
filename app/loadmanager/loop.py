@@ -2,9 +2,12 @@
 
 Der :class:`LoadManagerService` ist der zentrale Hintergrund-Task. Er wird
 beim App-Start gestartet und läuft mit konfigurierbarer Zykluszeit. Jede
-Station wird isoliert und mit eigenem Timeout gepollt – ein hängender Client
-blockiert den Zyklus nicht. Alle Ausnahmen werden pro Zyklus/Station gefangen,
-damit der Regelbetrieb im Dauerbetrieb stabil bleibt.
+Station (Modbus-TCP-Verbindung) wird isoliert und mit eigenem Timeout
+gepollt – ein hängender Client blockiert den Zyklus nicht. Zuteilung,
+Priorität, Zeitpläne, Verteiler und PV-Überschuss wirken auf Ebene der
+Ladepunkte (``ChargePoint``) – eine Station kann mehrere Ladepunkte haben
+(Doppel-Wallboxen). Alle Ausnahmen werden pro Zyklus/Station gefangen, damit
+der Regelbetrieb im Dauerbetrieb stabil bleibt.
 """
 
 from __future__ import annotations
@@ -15,19 +18,41 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.orm import joinedload
+
 from app.config import settings
 from app.db import session_scope
 from app.loadmanager import safety
-from app.loadmanager.engine import PHASES, AllocStation, BoardNode, allocate_tree, phase_totals
+from app.loadmanager.engine import (
+    PHASES,
+    AllocStation,
+    BoardNode,
+    allocate_tree,
+    phase_totals,
+    remaining_capacity_tree,
+)
+from app.loadmanager.schedule import ScheduleWindow, is_blocked
 from app.loadmanager.smoothing import SetpointSmoother
-from app.models import ChargingStation, DistributionBoard, GlobalConfig, Measurement
+from app.models import ChargePoint, ChargingStation, DistributionBoard, GlobalConfig, Measurement
 from app.models.base import ManagementMode
 from app.modbus.client import ModbusError, StationClient
-from app.modbus.runtime import ProfileSpec, StationSpec
+from app.modbus.runtime import ChargePointSpec, ProfileSpec, StationSpec
 
 log = logging.getLogger("lastmanagement.loop")
 
-# Persistierte Messwert-Schlüssel (Historie)
+# Bekannte, feste semantische Messwert-Schlüssel (siehe README). Werden für
+# jeden Ladepunkt anhand seines connector_suffix aus den Rohwerten der
+# Station aufgelöst und dabei vom Suffix befreit (siehe _cp_values()). Der
+# Klartext zu charge_status wird gesondert behandelt: der Modbus-Client
+# hängt "_text" an den VOLLEN (bereits suffigierten) Registerschlüssel an
+# (siehe app.modbus.client.StationClient.read_all), das Suffix steht also
+# VOR "_text", nicht dahinter.
+_KNOWN_VALUE_KEYS = (
+    "current_l1", "current_l2", "current_l3",
+    "active_power", "energy_total", "charge_status",
+)
+
+# Davon werden diese Schlüssel als Messwert-Historie persistiert
 _PERSIST_KEYS = ("current_l1", "current_l2", "current_l3", "active_power", "energy_total")
 
 # Statuswörter zur Erkennung eines ladebereiten/ladenden Fahrzeugs
@@ -35,8 +60,22 @@ _IDLE_WORDS = ("verfügbar", "available", "frei", "kein", "idle", "getrennt", "d
 _ERROR_WORDS = ("fehler", "error", "fault", "störung")
 
 
+def _cp_values(cp: ChargePointSpec, raw: dict) -> dict:
+    """Extrahiert die zu einem Ladepunkt gehörenden Werte aus dem
+    Roh-Ergebnis seiner Station (Connector-Suffix entfernt)."""
+    out = {}
+    for base in _KNOWN_VALUE_KEYS:
+        key = base + cp.connector_suffix
+        if key in raw:
+            out[base] = raw[key]
+    text_key = "charge_status" + cp.connector_suffix + "_text"
+    if text_key in raw:
+        out["charge_status_text"] = raw[text_key]
+    return out
+
+
 def _wants_charge(values: dict) -> bool:
-    """Heuristik: Will/kann die Station laden? (Fahrzeug verbunden)."""
+    """Heuristik: Will/kann der Ladepunkt laden? (Fahrzeug verbunden)."""
     text = values.get("charge_status_text")
     if isinstance(text, str):
         low = text.lower()
@@ -64,7 +103,7 @@ def _root_board(boards_data: list[dict]) -> dict:
 
 def _build_board_tree(boards_data: list[dict], alloc_by_board: dict[int, list[AllocStation]]) -> BoardNode:
     """Baut den BoardNode-Baum aus den flachen DB-Zeilen und den je Verteiler
-    direkt angeschlossenen (ladebereiten) Stationen."""
+    direkt angeschlossenen (ladebereiten) Ladepunkten."""
     by_id = {b["id"]: b for b in boards_data}
     children_of: dict[int | None, list[dict]] = {}
     for b in boards_data:
@@ -77,6 +116,7 @@ def _build_board_tree(boards_data: list[dict], alloc_by_board: dict[int, list[Al
             id=b["id"],
             fuse_a=b["fuse_a"],
             priority=b["priority"],
+            strategy=b.get("strategy"),
             children=child_nodes,
             stations=tuple(alloc_by_board.get(board_id, [])),
         )
@@ -90,16 +130,16 @@ class LoadManagerService:
     def __init__(self):
         self._clients: dict[int, StationClient] = {}
         self._smoother = SetpointSmoother()
-        self._last_success: dict[int, float] = {}
-        self._last_written: dict[int, tuple[float, int | None]] = {}
-        self._plug_order: dict[int, int] = {}
+        self._last_success: dict[int, float] = {}  # station_id -> monotonic (Verbindungsebene)
+        self._last_written: dict[int, tuple[float, int | None]] = {}  # charge_point_id
+        self._plug_order: dict[int, int] = {}  # charge_point_id
         self._plug_seq = 0
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._tz = ZoneInfo(settings.timezone)
         # Momentaufnahme für die API (thread-/task-sicher genug via Zuweisung)
         self.snapshot: dict = {
-            "stations": {},
+            "charge_points": {},
             "phase_load_a": {p: 0.0 for p in PHASES},
             "phase_available_a": {p: 0.0 for p in PHASES},
             "effective_limit_current_a": 0.0,
@@ -143,10 +183,9 @@ class LoadManagerService:
 
     # --- Datenbeschaffung --------------------------------------------------
 
-    def _load_config(
-        self,
-    ) -> tuple[dict, list[StationSpec], StationSpec | None, list[dict]]:
-        """Lädt Konfiguration, aktive Stationen, Zähler und den Verteilungsbaum (blockierend)."""
+    def _load_config(self):
+        """Lädt Konfiguration, Stationen, Ladepunkte, Zeitpläne, Zähler und
+        den Verteilungsbaum (blockierend)."""
         with session_scope() as session:
             cfg = GlobalConfig.get_or_create(session)
             cfg_dict = {
@@ -162,12 +201,28 @@ class LoadManagerService:
                 "en14a_active": cfg.en14a_active,
                 "en14a_limit_current_a": cfg.en14a_limit_current_a,
             }
-            stations = (
-                session.query(ChargingStation)
-                .filter(ChargingStation.enabled.is_(True))
+
+            stations = session.query(ChargingStation).all()
+            specs = [StationSpec.from_station(s) for s in stations]
+
+            charge_points = (
+                session.query(ChargePoint)
+                .filter(ChargePoint.enabled.is_(True))
+                .options(joinedload(ChargePoint.schedules))
                 .all()
             )
-            specs = [StationSpec.from_station(s) for s in stations]
+            cp_specs = [ChargePointSpec.from_charge_point(cp) for cp in charge_points]
+            schedules_by_cp = {
+                cp.id: [
+                    ScheduleWindow(
+                        weekdays_mask=sch.weekdays_mask,
+                        start_time=sch.start_time,
+                        end_time=sch.end_time,
+                    )
+                    for sch in cp.schedules
+                ]
+                for cp in charge_points
+            }
 
             # Wurzel (Hauptverteilung) garantiert vorhanden; Default-Absicherung
             # = aktuelle Netzgrenze, damit Bestandsinstallationen ohne
@@ -179,6 +234,7 @@ class LoadManagerService:
                     "parent_board_id": b.parent_board_id,
                     "fuse_a": b.incoming_fuse_a,
                     "priority": b.priority,
+                    "strategy": b.strategy,
                 }
                 for b in session.query(DistributionBoard).all()
             ]
@@ -196,13 +252,8 @@ class LoadManagerService:
                         tcp_port=cfg.meter_tcp_port,
                         unit_id=cfg.meter_unit_id,
                         profile=ProfileSpec.from_profile(profile),
-                        phases=PHASES,
-                        priority=0,
-                        max_current_a=0.0,
-                        min_current_a=0.0,
-                        safe_state="block",
                     )
-        return cfg_dict, specs, meter_spec, boards_data
+        return cfg_dict, specs, cp_specs, schedules_by_cp, meter_spec, boards_data
 
     def _sync_clients(self, specs: list[StationSpec], meter: StationSpec | None) -> None:
         """Erzeugt/entfernt Clients passend zur aktuellen Stationsliste."""
@@ -232,7 +283,6 @@ class LoadManagerService:
                 asyncio.create_task(self._clients[sid].close())
                 del self._clients[sid]
                 self._last_success.pop(sid, None)
-                self._plug_order.pop(sid, None)
 
     async def _poll_station(self, spec: StationSpec) -> tuple[int, dict, str | None]:
         """Pollt eine Station mit eigenem Timeout, isoliert von den übrigen."""
@@ -250,39 +300,46 @@ class LoadManagerService:
     # --- Ein Regelzyklus ---------------------------------------------------
 
     async def _cycle(self) -> float:
-        cfg, specs, meter, boards_data = await asyncio.to_thread(self._load_config)
+        cfg, specs, cp_specs, schedules_by_cp, meter, boards_data = await asyncio.to_thread(self._load_config)
         self._sync_clients(specs, meter)
+        spec_by_id = {s.id: s for s in specs}
 
         # Hysterese-Parameter aktualisieren
         self._smoother.min_change_a = cfg["setpoint_min_change_a"]
         self._smoother.min_hold_s = cfg["setpoint_min_hold_s"]
 
-        now = time.monotonic()
+        now_monotonic = time.monotonic()
+        now_local = datetime.now(self._tz)
 
-        # 1) Alle Stationen parallel pollen
+        # 1) Alle Stationen (Verbindungen) parallel pollen
         results = await asyncio.gather(*(self._poll_station(s) for s in specs))
         values_by_id: dict[int, dict] = {}
-        error_by_id: dict[int, str | None] = {}
+        station_error_by_id: dict[int, str | None] = {}
         for sid, values, error in results:
             values_by_id[sid] = values
-            error_by_id[sid] = error
+            station_error_by_id[sid] = error
             if error is None:
-                self._last_success[sid] = now
+                self._last_success[sid] = now_monotonic
 
-        # 2) Online-/Offline-Status anhand Fail-Safe-Zeitfenster
-        online_ids: set[int] = set()
-        offline_specs: list[StationSpec] = []
-        spec_by_id = {s.id: s for s in specs}
+        # 2) Online-/Offline-Status der STATIONEN (Verbindungsebene) anhand
+        # Fail-Safe-Zeitfenster
+        online_station_ids: set[int] = set()
+        offline_station_ids: set[int] = set()
         for spec in specs:
             last = self._last_success.get(spec.id)
-            is_online = error_by_id.get(spec.id) is None and bool(values_by_id.get(spec.id))
-            within = last is not None and (now - last) <= cfg["fail_safe_after_s"]
+            is_online = station_error_by_id.get(spec.id) is None and bool(values_by_id.get(spec.id))
+            within = last is not None and (now_monotonic - last) <= cfg["fail_safe_after_s"]
             if is_online:
-                online_ids.add(spec.id)
+                online_station_ids.add(spec.id)
             elif not within:
-                # Kommunikationsverlust über Fail-Safe-Zeit -> sicherer Zustand
-                offline_specs.append(spec)
-                self._smoother.reset(spec.id)
+                offline_station_ids.add(spec.id)
+
+        # Ladepunkte, deren Station nicht erreichbar ist -> Fail-Safe-Reserve
+        offline_cps = []
+        for cp in cp_specs:
+            if cp.station_id in offline_station_ids:
+                offline_cps.append(cp)
+                self._smoother.reset(cp.id)
 
         # 3) Effektive Grenze bestimmen (§14a hat Vorrang, danach die
         # Absicherung der Hauptverteilung – beides wirkt zusätzlich zur
@@ -295,107 +352,136 @@ class LoadManagerService:
         effective_limit = min(effective_limit, root_board["fuse_a"])
         capacity = {p: effective_limit for p in PHASES}
 
-        # 4) Dynamisches Lastmanagement: Grundlast des Hauses abziehen
+        # 4) Dynamisches Lastmanagement: Grundlast abziehen, PV-Überschuss
+        # ermitteln (für den nachrangigen PV-Only-Verteilungslauf, Schritt 7)
         meter_ok = True
+        surplus = {p: 0.0 for p in PHASES}
         if cfg["management_mode"] == ManagementMode.DYNAMIC and meter is not None:
-            capacity, meter_ok = await self._apply_dynamic_meter(
-                meter, capacity, values_by_id, spec_by_id, online_ids
+            capacity, surplus, meter_ok = await self._apply_dynamic_meter(
+                meter, capacity, values_by_id, cp_specs, online_station_ids
             )
 
-        # 5) Reserven für unerreichbare Stationen abziehen (konservativ)
-        capacity = safety.subtract_reservations(capacity, offline_specs)
+        # 5) Reserven für unerreichbare Ladepunkte abziehen (konservativ)
+        capacity = safety.subtract_reservations(capacity, offline_cps)
         capacity = safety.clamp_capacity(capacity)
 
-        # 6) Ladebereite Online-Stationen ermitteln + FIFO-Reihenfolge pflegen,
-        # gruppiert nach ihrem Verteiler (Abgang) für die hierarchische
-        # Zuteilung. Stationen ohne zugewiesenen Verteiler hängen an der
-        # Wurzel (Hauptverteilung).
-        alloc_by_board: dict[int, list[AllocStation]] = {}
-        active_specs: list[StationSpec] = []
-        for spec in specs:
-            if spec.id not in online_ids:
+        # 6) Ladebereite Online-Ladepunkte ermitteln (Zeitplan-Sperre, will-
+        # laden-Heuristik, FIFO-Reihenfolge pflegen), getrennt nach
+        # Grid-Vorrang und PV-Only, gruppiert nach Verteiler.
+        grid_alloc_by_board: dict[int, list[AllocStation]] = {}
+        pv_alloc_by_board: dict[int, list[AllocStation]] = {}
+        active_cps: list[ChargePointSpec] = []
+        for cp in cp_specs:
+            if cp.station_id not in online_station_ids:
                 continue
-            if not _wants_charge(values_by_id[spec.id]):
-                self._plug_order.pop(spec.id, None)
+            values = _cp_values(cp, values_by_id.get(cp.station_id, {}))
+            if not _wants_charge(values):
+                self._plug_order.pop(cp.id, None)
                 continue
-            if spec.id not in self._plug_order:
+            if is_blocked(schedules_by_cp.get(cp.id, []), now_local):
+                self._plug_order.pop(cp.id, None)
+                continue
+            if cp.id not in self._plug_order:
                 self._plug_seq += 1
-                self._plug_order[spec.id] = self._plug_seq
-            active_specs.append(spec)
-            board_id = spec.distribution_board_id or root_board["id"]
-            alloc_by_board.setdefault(board_id, []).append(
-                AllocStation(
-                    id=spec.id,
-                    phases=spec.phases,
-                    min_current_a=spec.min_current_a,
-                    max_current_a=spec.max_current_a,
-                    priority=spec.priority,
-                    order=self._plug_order[spec.id],
-                )
+                self._plug_order[cp.id] = self._plug_seq
+            active_cps.append(cp)
+            alloc_station = AllocStation(
+                id=cp.id,
+                phases=cp.phases,
+                min_current_a=cp.min_current_a,
+                max_current_a=cp.max_current_a,
+                priority=cp.priority,
+                order=self._plug_order[cp.id],
             )
+            board_id = cp.distribution_board_id or root_board["id"]
+            group = pv_alloc_by_board if cp.pv_surplus_only else grid_alloc_by_board
+            group.setdefault(board_id, []).append(alloc_station)
 
-        # 7) Verteilung berechnen (harte Grenzgarantie auf JEDER Ebene des
-        # Verteilungsbaums, nicht nur an der Wurzel)
-        tree = _build_board_tree(boards_data, alloc_by_board)
-        targets = allocate_tree(tree, capacity, cfg["distribution_strategy"])
-        alloc_stations = [s for stations in alloc_by_board.values() for s in stations]
+        # 7) Verteilung berechnen: Lauf 1 (Grid-Vorrang, harte Grenzgarantie
+        # auf JEDER Ebene des Verteilungsbaums) + Lauf 2 (PV-Only, nachrangig,
+        # begrenzt durch PV-Überschuss UND die je Verteiler nach Lauf 1 noch
+        # freie Absicherung).
+        grid_tree = _build_board_tree(boards_data, grid_alloc_by_board)
+        targets = allocate_tree(grid_tree, capacity, cfg["distribution_strategy"])
+        if pv_alloc_by_board:
+            pv_tree = remaining_capacity_tree(grid_tree, targets, pv_alloc_by_board)
+            pv_capacity = {p: min(surplus[p], pv_tree.fuse_a) for p in PHASES}
+            pv_targets = allocate_tree(pv_tree, pv_capacity, cfg["distribution_strategy"])
+            targets.update(pv_targets)
+
+        alloc_stations = [
+            s
+            for stations in list(grid_alloc_by_board.values()) + list(pv_alloc_by_board.values())
+            for s in stations
+        ]
 
         # 8) Sollwerte glätten und schreiben
-        await self._write_setpoints(active_specs, targets)
+        await self._write_setpoints(active_cps, spec_by_id, targets)
 
         # 9) Messwerte persistieren + Momentaufnahme aktualisieren
-        await asyncio.to_thread(self._persist, values_by_id, online_ids)
+        await asyncio.to_thread(self._persist, cp_specs, values_by_id, online_station_ids)
         self._update_snapshot(
-            specs, values_by_id, error_by_id, online_ids, targets,
+            cp_specs, values_by_id, station_error_by_id, online_station_ids, targets,
             capacity, effective_limit, en14a_active, alloc_stations, meter_ok
         )
         return max(0.5, cfg["poll_interval_s"])
 
-    async def _apply_dynamic_meter(self, meter, capacity, values_by_id, spec_by_id, online_ids):
-        """Berechnet die verfügbare Kapazität abzüglich der Haus-Grundlast."""
+    async def _apply_dynamic_meter(self, meter, capacity, values_by_id, cp_specs, online_station_ids):
+        """Berechnet die verfügbare Kapazität abzüglich der Haus-Grundlast
+        sowie den PV-Überschuss (Einspeisung) je Phase.
+
+        Der Zähler liefert vorzeichenbehaftete Ströme: positiv = Netzbezug,
+        negativ = Einspeisung. Ein negativer Nettowert (nach Abzug der
+        eigenen Wallbox-Last) ist verfügbarer PV-Überschuss.
+        """
         try:
             meter_vals = await asyncio.wait_for(
                 self._clients[meter.id].read_all(), timeout=settings.modbus_timeout_s + 1
             )
         except (ModbusError, asyncio.TimeoutError, OSError) as exc:
-            # Fail-Safe: Zähler nicht lesbar -> konservativ nur Minimalbetrieb
+            # Fail-Safe: Zähler nicht lesbar -> konservativ nur Minimalbetrieb,
+            # kein PV-Überschuss annehmen.
             log.warning("Netzanschlusszähler nicht lesbar (%s) – konservative Begrenzung", exc)
             self.snapshot["meter_values"] = {}
-            # Kapazität auf 0 setzen: nur bereits laufende Boxen behalten Minimalstrom
-            return {p: 0.0 for p in PHASES}, False
+            return {p: 0.0 for p in PHASES}, {p: 0.0 for p in PHASES}, False
 
         self.snapshot["meter_values"] = meter_vals
-        result = {}
+        capacity_result = {}
+        surplus_result = {}
         for i, phase in enumerate(PHASES, start=1):
             total = float(meter_vals.get(f"current_l{i}", meter_vals.get("current", 0.0)) or 0.0)
-            # Anteil, den unsere Wallboxen aktuell auf dieser Phase ziehen
+            # Aktuelle Wallbox-Last aller online Ladepunkte auf dieser Phase
             wb = 0.0
-            for sid in online_ids:
-                spec = spec_by_id[sid]
-                if phase in spec.phases:
-                    wb += float(values_by_id[sid].get(f"current_l{i}", 0.0) or 0.0)
-            base_load = max(0.0, total - wb)  # Grundlast ohne Wallboxen
-            result[phase] = max(0.0, capacity[phase] - base_load)
-        return result, True
+            for cp in cp_specs:
+                if cp.station_id in online_station_ids and phase in cp.phases:
+                    raw = values_by_id.get(cp.station_id, {})
+                    wb += float(raw.get(f"current_l{i}{cp.connector_suffix}", 0.0) or 0.0)
+            net = total - wb  # > 0: Netzbezug (Grundlast), < 0: Einspeisung
+            capacity_result[phase] = max(0.0, capacity[phase] - max(0.0, net))
+            surplus_result[phase] = max(0.0, -net)
+        return capacity_result, surplus_result, True
 
-    async def _write_setpoints(self, specs: list[StationSpec], targets: dict[int, float]) -> None:
-        """Schreibt Sollstrom + enable, geglättet und nur bei Änderung."""
-        for spec in specs:
-            client = self._clients.get(spec.id)
-            if client is None:
+    async def _write_setpoints(
+        self,
+        active_cps: list[ChargePointSpec],
+        spec_by_id: dict[int, StationSpec],
+        targets: dict[int, float],
+    ) -> None:
+        """Schreibt Sollstrom + enable je Ladepunkt, geglättet und nur bei
+        Änderung. Registerauflösung berücksichtigt den Connector-Suffix."""
+        for cp in active_cps:
+            client = self._clients.get(cp.station_id)
+            station_spec = spec_by_id.get(cp.station_id)
+            if client is None or station_spec is None:
                 continue
-            target = targets.get(spec.id, 0.0)
-            smoothed = self._smoother.desired(spec.id, target)
+            target = targets.get(cp.id, 0.0)
+            smoothed = self._smoother.desired(cp.id, target)
 
-            set_spec = spec.profile.registers.get("set_current")
-            enable_spec = spec.profile.registers.get("enable")
-            enable_val = None
-            if smoothed <= 0.0:
-                enable_val = 0  # pausieren
-            else:
-                enable_val = 1
+            set_spec = cp.register(station_spec.profile, "set_current")
+            enable_spec = cp.register(station_spec.profile, "enable")
+            enable_val = 0 if smoothed <= 0.0 else 1
 
-            last = self._last_written.get(spec.id)
+            last = self._last_written.get(cp.id)
             new_state = (round(smoothed, 3), enable_val)
             if last == new_state:
                 continue  # keine Änderung -> Bus schonen, Relais-Flattern vermeiden
@@ -408,26 +494,34 @@ class LoadManagerService:
                 elif set_spec is not None and enable_spec is None and smoothed <= 0.0:
                     # Kein enable-Register: soweit möglich herunterregeln
                     log.warning(
-                        "Station %s: kein enable-Register – Pausieren nur via Minimalstrom möglich",
-                        spec.name,
+                        "Ladepunkt %s: kein enable-Register – Pausieren nur via Minimalstrom möglich",
+                        cp.name,
                     )
-                self._last_written[spec.id] = new_state
+                self._last_written[cp.id] = new_state
                 reason = "pausiert (unter Minimalstrom)" if smoothed <= 0 else f"Zuteilung {smoothed:.1f} A"
-                log.info("Sollwert Station %s -> %.1f A (%s)", spec.name, smoothed, reason)
+                log.info("Sollwert Ladepunkt %s -> %.1f A (%s)", cp.name, smoothed, reason)
             except (ModbusError, asyncio.TimeoutError, OSError) as exc:
-                log.warning("Station %s: Sollwert-Schreiben fehlgeschlagen: %s", spec.name, exc)
+                log.warning("Ladepunkt %s: Sollwert-Schreiben fehlgeschlagen: %s", cp.name, exc)
 
     # --- Persistenz & Momentaufnahme --------------------------------------
 
-    def _persist(self, values_by_id: dict[int, dict], online_ids: set[int]) -> None:
-        """Persistiert ausgewählte Messwerte der Online-Stationen."""
+    def _persist(
+        self,
+        cp_specs: list[ChargePointSpec],
+        values_by_id: dict[int, dict],
+        online_station_ids: set[int],
+    ) -> None:
+        """Persistiert ausgewählte Messwerte der online erreichbaren Ladepunkte."""
         ts = datetime.now(self._tz)
         rows = []
-        for sid in online_ids:
+        for cp in cp_specs:
+            if cp.station_id not in online_station_ids:
+                continue
+            values = _cp_values(cp, values_by_id.get(cp.station_id, {}))
             for key in _PERSIST_KEYS:
-                val = values_by_id.get(sid, {}).get(key)
+                val = values.get(key)
                 if isinstance(val, (int, float)):
-                    rows.append(Measurement(station_id=sid, timestamp=ts, key=key, value=float(val)))
+                    rows.append(Measurement(charge_point_id=cp.id, timestamp=ts, key=key, value=float(val)))
         if not rows:
             return
         try:
@@ -436,22 +530,26 @@ class LoadManagerService:
         except Exception:  # pragma: no cover
             log.exception("Messwerte konnten nicht gespeichert werden")
 
-    def _update_snapshot(self, specs, values_by_id, error_by_id, online_ids, targets,
-                         capacity, effective_limit, en14a_active, alloc_stations, meter_ok):
-        stations_snap = {}
-        for spec in specs:
-            stations_snap[spec.id] = {
-                "station_id": spec.id,
-                "name": spec.name,
-                "online": spec.id in online_ids,
-                "values": values_by_id.get(spec.id, {}),
-                "setpoint_a": targets.get(spec.id),
-                "error": error_by_id.get(spec.id),
+    def _update_snapshot(
+        self, cp_specs, values_by_id, station_error_by_id, online_station_ids, targets,
+        capacity, effective_limit, en14a_active, alloc_stations, meter_ok,
+    ):
+        cp_snap = {}
+        for cp in cp_specs:
+            online = cp.station_id in online_station_ids
+            values = _cp_values(cp, values_by_id.get(cp.station_id, {})) if online else {}
+            cp_snap[cp.id] = {
+                "charge_point_id": cp.id,
+                "name": cp.name,
+                "online": online,
+                "values": values,
+                "setpoint_a": targets.get(cp.id),
+                "error": None if online else station_error_by_id.get(cp.station_id),
             }
         load = phase_totals(targets, alloc_stations)
         self.snapshot = {
             **self.snapshot,
-            "stations": stations_snap,
+            "charge_points": cp_snap,
             "phase_load_a": load,
             "phase_available_a": capacity,
             "effective_limit_current_a": effective_limit,

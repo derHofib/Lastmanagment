@@ -55,36 +55,27 @@ def test_station_crud(client):
     pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
     station = {
         "name": "Garage links", "ip_address": "192.168.1.50", "tcp_port": 502,
-        "unit_id": 1, "profile_id": pid, "phase_config": "3p", "priority": 5,
-        "max_current_a": 32, "min_current_a": 6, "enabled": True, "safe_state": "block",
+        "unit_id": 1, "profile_id": pid,
     }
     r = client.post("/api/stations", json=station)
     assert r.status_code == 201, r.text
     sid = r.json()["id"]
 
-    # Live ohne Regelzyklus -> offline
-    live = client.get(f"/api/stations/{sid}/live").json()
-    assert live["online"] is False
-
     # Profil in Benutzung -> löschen verboten
     assert client.delete(f"/api/profiles/{pid}").status_code == 409
 
     # Station aktualisieren
-    station["priority"] = 9
-    assert client.put(f"/api/stations/{sid}", json=station).json()["priority"] == 9
+    station["location"] = "Garage"
+    assert client.put(f"/api/stations/{sid}", json=station).json()["location"] == "Garage"
+
+    # Verbindungstest ohne echten Wallbox-Server -> offline, kein Fehler
+    r = client.post(f"/api/stations/{sid}/test")
+    assert r.status_code == 200
+    assert r.json()["online"] is False
 
     # Station löschen, dann Profil löschbar
     assert client.delete(f"/api/stations/{sid}").status_code == 204
     assert client.delete(f"/api/profiles/{pid}").status_code == 204
-
-
-def test_station_min_max_validation(client):
-    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
-    station = {
-        "name": "X", "ip_address": "10.0.0.1", "profile_id": pid,
-        "max_current_a": 6, "min_current_a": 16,
-    }
-    assert client.post("/api/stations", json=station).status_code == 422
 
 
 def test_config_update(client):
@@ -180,26 +171,91 @@ def test_station_with_board_and_circuit_breaker(client):
     uv_id = client.post("/api/boards", json={
         "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
     }).json()["id"]
-
-    station = {
+    sid = client.post("/api/stations", json={
         "name": "Garage links", "ip_address": "192.168.1.50", "profile_id": pid,
+    }).json()["id"]
+
+    charge_point = {
+        "station_id": sid, "name": "Ladepunkt 1",
         "distribution_board_id": uv_id, "circuit_breaker_a": 16,
         "max_current_a": 32, "min_current_a": 6,
     }
-    r = client.post("/api/stations", json=station)
+    r = client.post("/api/charge-points", json=charge_point)
     assert r.status_code == 201, r.text
     assert r.json()["circuit_breaker_a"] == 16
-    sid = r.json()["id"]
+    cp_id = r.json()["id"]
 
     # Unbekannter Verteiler -> 400
-    bad = dict(station, distribution_board_id=9999)
-    assert client.post("/api/stations", json=bad).status_code == 400
+    bad = dict(charge_point, distribution_board_id=9999)
+    assert client.post("/api/charge-points", json=bad).status_code == 400
 
-    # Verteiler mit zugewiesener Station kann nicht gelöscht werden
+    # Unbekannte Station -> 400
+    bad2 = dict(charge_point, station_id=9999)
+    assert client.post("/api/charge-points", json=bad2).status_code == 400
+
+    # Verteiler mit zugewiesenem Ladepunkt kann nicht gelöscht werden
     assert client.delete(f"/api/boards/{uv_id}").status_code == 409
 
-    client.delete(f"/api/stations/{sid}")
+    client.delete(f"/api/charge-points/{cp_id}")
     assert client.delete(f"/api/boards/{uv_id}").status_code == 204
+
+
+def test_charge_point_min_max_validation(client):
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+    sid = client.post("/api/stations", json={
+        "name": "X", "ip_address": "10.0.0.1", "profile_id": pid,
+    }).json()["id"]
+    charge_point = {
+        "station_id": sid, "name": "CP", "max_current_a": 6, "min_current_a": 16,
+    }
+    assert client.post("/api/charge-points", json=charge_point).status_code == 422
+
+
+def test_charge_point_crud_with_schedules_and_dual_connector(client):
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+    sid = client.post("/api/stations", json={
+        "name": "Doppel-Wallbox", "ip_address": "192.168.1.60", "profile_id": pid,
+    }).json()["id"]
+
+    cp1 = {
+        "station_id": sid, "connector_suffix": "_1", "name": "Ladepunkt 1",
+        "priority": 5, "max_current_a": 16, "min_current_a": 6,
+        "schedules": [
+            {"weekdays_mask": 0b0011111, "start_time": "22:00:00", "end_time": "06:00:00"},
+        ],
+    }
+    r = client.post("/api/charge-points", json=cp1)
+    assert r.status_code == 201, r.text
+    cp1_id = r.json()["id"]
+    assert len(r.json()["schedules"]) == 1
+    assert r.json()["connector_suffix"] == "_1"
+
+    cp2 = {
+        "station_id": sid, "connector_suffix": "_2", "name": "Ladepunkt 2",
+        "pv_surplus_only": True, "max_current_a": 16, "min_current_a": 6,
+    }
+    r2 = client.post("/api/charge-points", json=cp2)
+    assert r2.status_code == 201, r2.text
+    cp2_id = r2.json()["id"]
+    assert r2.json()["pv_surplus_only"] is True
+
+    # Beide Ladepunkte gehören zur selben Station
+    listed = client.get("/api/charge-points").json()
+    ids = {cp["id"] for cp in listed}
+    assert {cp1_id, cp2_id} <= ids
+
+    # Live ohne Regelzyklus -> offline
+    live = client.get(f"/api/charge-points/{cp1_id}/live").json()
+    assert live["online"] is False
+
+    # Zeitpläne aktualisieren (vollständig ersetzen)
+    cp1["schedules"] = []
+    r = client.put(f"/api/charge-points/{cp1_id}", json=cp1)
+    assert r.status_code == 200
+    assert r.json()["schedules"] == []
+
+    assert client.delete(f"/api/charge-points/{cp1_id}").status_code == 204
+    assert client.delete(f"/api/charge-points/{cp2_id}").status_code == 204
 
 
 def test_board_tree_endpoint(client):
@@ -214,3 +270,31 @@ def test_board_tree_endpoint(client):
     assert len(tree["children"]) == 1
     assert tree["children"][0]["name"] == "UV Garage"
     assert set(tree["load_a"]) == {"L1", "L2", "L3"}
+
+
+def test_board_strategy_field_roundtrip(client):
+    root_id = client.get("/api/boards").json()[0]["id"]
+    r = client.post("/api/boards", json={
+        "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
+        "strategy": "priority",
+    })
+    assert r.status_code == 201, r.text
+    uv_id = r.json()["id"]
+    assert r.json()["strategy"] == "priority"
+
+    # Ohne Angabe -> None (erbt von übergeordnetem Verteiler/global)
+    r = client.get(f"/api/boards/{uv_id}")
+    assert r.json()["strategy"] == "priority"
+
+    r = client.put(f"/api/boards/{uv_id}", json={
+        "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
+        "strategy": None,
+    })
+    assert r.status_code == 200
+    assert r.json()["strategy"] is None
+
+    tree = client.get("/api/boards/tree").json()
+    uv_node = next(c for c in tree["children"] if c["name"] == "UV Garage")
+    assert uv_node["strategy"] is None
+
+    client.delete(f"/api/boards/{uv_id}")

@@ -11,16 +11,16 @@ from app.models.base import Base
 
 
 class Measurement(Base):
-    """Ein einzelner gemessener Wert einer Station zu einem Zeitpunkt."""
+    """Ein einzelner gemessener Wert eines Ladepunkts zu einem Zeitpunkt."""
 
     __tablename__ = "measurements"
     __table_args__ = (
-        Index("ix_measurement_station_ts", "station_id", "timestamp"),
+        Index("ix_measurement_charge_point_ts", "charge_point_id", "timestamp"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    station_id: Mapped[int] = mapped_column(
-        ForeignKey("charging_stations.id", ondelete="CASCADE"), nullable=False
+    charge_point_id: Mapped[int] = mapped_column(
+        ForeignKey("charge_points.id", ondelete="CASCADE"), nullable=False
     )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     key: Mapped[str] = mapped_column(String(60), nullable=False)

@@ -85,8 +85,7 @@ def _example_station(port: int) -> StationSpec:
     profile = ProfileSpec(name="Test", registers=regs)
     return StationSpec(
         id=1, name="Testbox", ip_address="127.0.0.1", tcp_port=port, unit_id=1,
-        profile=profile, phases=("L1", "L2", "L3"), priority=0,
-        max_current_a=32, min_current_a=6, safe_state="block",
+        profile=profile,
     )
 
 

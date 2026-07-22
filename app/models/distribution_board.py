@@ -13,10 +13,10 @@ nur pro Baumknoten wiederholt.
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
-from app.models.base import Base
+from app.models.base import Base, DistributionStrategy
 
 
 class DistributionBoard(Base):
@@ -39,6 +39,13 @@ class DistributionBoard(Base):
 
     # Priorität zwischen Geschwister-Zweigen bei der priority-Strategie
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Verteilstrategie für DIESEN Verteiler-Zweig. None = erbt vom
+    # übergeordneten Verteiler (kaskadierend) bzw. zuletzt von der globalen
+    # Strategie (GlobalConfig.distribution_strategy) an der Wurzel.
+    strategy: Mapped[DistributionStrategy | None] = mapped_column(
+        Enum(DistributionStrategy), nullable=True
+    )
 
     location: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
