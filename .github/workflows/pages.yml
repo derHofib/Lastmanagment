@@ -42,13 +42,13 @@ jobs:
           # Jekyll-Verarbeitung deaktivieren
           touch _site/.nojekyll
 
-      # Aktiviert Pages automatisch (funktioniert auf öffentlichen Repos mit
-      # pages:write-Berechtigung). Falls dies fehlschlägt, Pages einmalig
-      # manuell aktivieren: Settings → Pages → Source = "GitHub Actions".
+      # Der Actions-Token darf eine Pages-Site nicht per API neu anlegen
+      # (erfordert Admin-Rechte, unabhängig von Public/Private) – daher kein
+      # enablement:true. Pages muss einmalig manuell aktiviert werden:
+      # Settings → Pages → Source = "GitHub Actions". Ist das erledigt,
+      # findet dieser Schritt die Site und der Deploy läuft durch.
       - name: Pages konfigurieren
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Artefakt hochladen
         uses: actions/upload-pages-artifact@v3
