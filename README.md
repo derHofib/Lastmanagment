@@ -84,7 +84,8 @@ Datenfluss im Regelzyklus (`app/loadmanager/loop.py`):
 3. Effektive Grenze bestimmen (`§14a` hat Vorrang, dann ggf. dynamisch abzüglich
    Grundlast).
 4. Reserven für unerreichbare Stationen abziehen (konservativ).
-5. Verteilung berechnen (harte Grenzgarantie je Phase).
+5. Verteilung berechnen (harte Grenzgarantie **auf jeder Ebene der
+   Verteilungshierarchie** – siehe unten).
 6. Sollwerte glätten (Hysterese) und nur bei Änderung schreiben.
 7. Messwerte persistieren + Momentaufnahme für die API aktualisieren.
 
@@ -104,6 +105,37 @@ Datenfluss im Regelzyklus (`app/loadmanager/loop.py`):
   `distribution_strategy`, `poll_interval_s`, Hysterese, Fail-Safe, Zähler,
   §14a.
 - **Measurement** – optionale Messwert-Historie.
+- **DistributionBoard** – Verteiler (Hauptverteilung/Unterverteilung) im
+  Verteilungsbaum: `name`, `parent_board_id` (selbstreferenziell, `None` =
+  Wurzel/Hauptverteilung), `incoming_fuse_a` (Absicherung der Zuleitung),
+  `priority`.
+
+---
+
+## Verteilungshierarchie (Hauptverteilung / Unterverteilung / Abgänge)
+
+Bildet die reale Elektroinstallation ab: **Hauptverteilung** (Hausanschluss,
+eigene Absicherung) → **Unterverteilungen** (jeweils mit eigener
+Zuleitungs-Absicherung) → **Abgänge zu den Ladestationen** (jeweils mit
+eigener Absicherung, `ChargingStation.circuit_breaker_a` – separat vom
+technischen `max_current_a` der Wallbox selbst).
+
+Das Lastmanagement (`app/loadmanager/engine.py::allocate_tree`) hält die
+Absicherung auf **jeder Ebene** des Baums ein – nicht nur die
+Gesamtstromgrenze am Hausanschluss. Jeder Unterverteiler-Zweig wird dabei
+wie eine virtuelle 3-phasige Station behandelt (begrenzt durch seine eigene
+Absicherung), wodurch die bereits getestete `allocate()`-Logik unverändert
+rekursiv wiederverwendet wird. Ohne konfigurierte Unterverteiler entspricht
+das Verhalten exakt der bisherigen flachen Zuteilung.
+
+Verwaltung über den Reiter **„Verteilung"** im Web-UI: Hauptverteilung wird
+automatisch angelegt, Unterverteilungen und deren Zuordnung zu Ladestationen
+lassen sich dort anlegen/bearbeiten/löschen; die Baumansicht zeigt die
+aktuelle Auslastung je Phase gegen die jeweilige Absicherung.
+
+Beispiel: Zwei Ladestationen (je bis 32 A fähig) hängen an einer
+Unterverteilung mit nur 20 A Absicherung → jede bekommt trotz höherer
+Netzgrenze und höherem Wallbox-Maximum nur 10 A zugeteilt (Summe = 20 A).
 
 ---
 
@@ -250,9 +282,10 @@ Abgedeckt:
   Skalierung/Offset, Roundtrips, Grenzwert-Clamping, `enum_map`.
 - **Lastmanagement** (`tests/test_loadmanager.py`): equal/priority/fifo,
   Phasengenauigkeit, Minimalstrom-Regel, Grenzwert-Garantie unter Zufallslasten,
-  Hysterese/Haltezeiten.
-- **API** (`tests/test_api.py`): CRUD für Profile/Stationen/Config, Validierung,
-  Import/Export, Status.
+  Hysterese/Haltezeiten, hierarchische Verteilungshierarchie (`allocate_tree`)
+  inkl. Engpass auf Unterverteiler-Ebene und Zufallsbäumen.
+- **API** (`tests/test_api.py`): CRUD für Profile/Stationen/Config/Verteiler,
+  Validierung (u. a. Zyklenschutz im Verteilungsbaum), Import/Export, Status.
 - **Modbus-Integration** (`tests/test_integration_modbus.py`): End-to-end gegen
   einen echten `pymodbus`-TCP-Server inkl. Schreiben & Clamping.
 
@@ -283,6 +316,9 @@ Datenbank gehalten.
 | PUT/DELETE | `/api/stations/{id}` | Station ändern/löschen |
 | GET | `/api/stations/{id}/live` | aktuelle Messwerte |
 | POST | `/api/stations/{id}/test` | Verbindungs-/Profiltest |
+| GET/POST | `/api/boards` | Verteiler auflisten/anlegen |
+| PUT/DELETE | `/api/boards/{id}` | Verteiler ändern/löschen |
+| GET | `/api/boards/tree` | kompletter Verteilungsbaum inkl. Live-Auslastung |
 | GET/PUT | `/api/config` | globale Grenzwerte & Modus |
 | GET | `/api/status` | Systemzustand (Last/Reserve/Ladepunkte) |
 

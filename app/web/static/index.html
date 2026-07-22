@@ -14,6 +14,7 @@
     <nav>
       <button data-view="dashboard" class="active">Dashboard</button>
       <button data-view="stations">Ladestationen</button>
+      <button data-view="boards">Verteilung</button>
       <button data-view="profiles">Geräteprofile</button>
       <button data-view="settings">Einstellungen</button>
     </nav>
@@ -53,10 +54,27 @@
       <div class="card">
         <table>
           <thead>
-            <tr><th>Name</th><th>IP:Port</th><th>Unit</th><th>Profil</th><th>Phasen</th><th>Prio</th><th>Min/Max A</th><th>Aktiv</th><th></th></tr>
+            <tr><th>Name</th><th>IP:Port</th><th>Unit</th><th>Profil</th><th>Verteiler</th><th>Phasen</th><th>Prio</th><th>Min/Max A</th><th>Aktiv</th><th></th></tr>
           </thead>
           <tbody id="stations-tbody"></tbody>
         </table>
+      </div>
+    </section>
+
+    <!-- Verteilung (Hauptverteilung / Unterverteilung / Abgänge) -->
+    <section id="boards" class="view">
+      <div class="toolbar">
+        <h2>Verteilungshierarchie</h2>
+        <button class="btn" onclick="openBoard()">+ Unterverteilung</button>
+      </div>
+      <div class="card">
+        <p class="small-note">
+          Bildet die reale Elektroinstallation ab: Hauptverteilung (Hausanschluss)
+          → Unterverteilungen → Abgänge zu den Ladestationen, jeweils mit eigener
+          Absicherung. Das Lastmanagement hält die Absicherung auf JEDER Ebene ein,
+          nicht nur die Gesamtgrenze am Hausanschluss.
+        </p>
+        <div id="board-tree"></div>
       </div>
     </section>
 
@@ -89,6 +107,7 @@
   <!-- Dialoge -->
   <dialog id="station-dialog"></dialog>
   <dialog id="profile-dialog"></dialog>
+  <dialog id="board-dialog"></dialog>
   <input type="file" id="import-file" accept="application/json" style="display:none" />
   <div id="toast"></div>
 

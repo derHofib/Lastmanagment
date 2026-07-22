@@ -87,9 +87,18 @@ class StationSpec:
     max_current_a: float
     min_current_a: float
     safe_state: str
+    # An welchem Verteiler hängt der Abgang zu dieser Station? None = Wurzel
+    # (Hauptverteilung) – siehe app.models.distribution_board.
+    distribution_board_id: int | None = None
 
     @classmethod
     def from_station(cls, station: ChargingStation) -> "StationSpec":
+        # Effektive Obergrenze: das Kleinere aus technischer Wallbox-Grenze
+        # und Abgangs-Absicherung (falls hinterlegt) – niemals mehr als die
+        # Installation zulässt.
+        effective_max = station.max_current_a
+        if station.circuit_breaker_a is not None:
+            effective_max = min(effective_max, station.circuit_breaker_a)
         return cls(
             id=station.id,
             name=station.name,
@@ -99,7 +108,8 @@ class StationSpec:
             profile=ProfileSpec.from_profile(station.profile),
             phases=station.phases,
             priority=station.priority,
-            max_current_a=station.max_current_a,
+            max_current_a=effective_max,
             min_current_a=station.min_current_a,
             safe_state=station.safe_state.value,
+            distribution_board_id=station.distribution_board_id,
         )

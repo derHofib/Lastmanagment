@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_session
 from app.loadmanager.loop import service
-from app.models import ChargingStation, DeviceProfile
+from app.models import ChargingStation, DeviceProfile, DistributionBoard
 from app.modbus.client import ModbusError, StationClient
 from app.modbus.runtime import StationSpec
 from app.schemas import (
@@ -28,6 +28,11 @@ def _require_profile(session: Session, profile_id: int) -> DeviceProfile:
     return profile
 
 
+def _require_board(session: Session, board_id: int | None) -> None:
+    if board_id is not None and session.get(DistributionBoard, board_id) is None:
+        raise HTTPException(400, f"Verteiler {board_id} existiert nicht")
+
+
 @router.get("", response_model=list[ChargingStationRead])
 def list_stations(session: Session = Depends(get_session)):
     return session.query(ChargingStation).order_by(ChargingStation.name).all()
@@ -44,6 +49,7 @@ def get_station(station_id: int, session: Session = Depends(get_session)):
 @router.post("", response_model=ChargingStationRead, status_code=201)
 def create_station(data: ChargingStationCreate, session: Session = Depends(get_session)):
     _require_profile(session, data.profile_id)
+    _require_board(session, data.distribution_board_id)
     station = ChargingStation(**data.model_dump())
     session.add(station)
     session.commit()
@@ -57,6 +63,7 @@ def update_station(station_id: int, data: ChargingStationUpdate, session: Sessio
     if station is None:
         raise HTTPException(404, "Ladestation nicht gefunden")
     _require_profile(session, data.profile_id)
+    _require_board(session, data.distribution_board_id)
     for key, value in data.model_dump().items():
         setattr(station, key, value)
     session.commit()

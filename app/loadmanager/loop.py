@@ -18,9 +18,9 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db import session_scope
 from app.loadmanager import safety
-from app.loadmanager.engine import PHASES, AllocStation, allocate, phase_totals
+from app.loadmanager.engine import PHASES, AllocStation, BoardNode, allocate_tree, phase_totals
 from app.loadmanager.smoothing import SetpointSmoother
-from app.models import ChargingStation, GlobalConfig, Measurement
+from app.models import ChargingStation, DistributionBoard, GlobalConfig, Measurement
 from app.models.base import ManagementMode
 from app.modbus.client import ModbusError, StationClient
 from app.modbus.runtime import ProfileSpec, StationSpec
@@ -55,6 +55,33 @@ def _wants_charge(values: dict) -> bool:
         return total > 0.1
     # Keinerlei Info -> aktiv annehmen (minimalistisches Profil)
     return True
+
+
+def _root_board(boards_data: list[dict]) -> dict:
+    """Findet die Wurzel (Hauptverteilung, parent_board_id is None) im Baum."""
+    return next(b for b in boards_data if b["parent_board_id"] is None)
+
+
+def _build_board_tree(boards_data: list[dict], alloc_by_board: dict[int, list[AllocStation]]) -> BoardNode:
+    """Baut den BoardNode-Baum aus den flachen DB-Zeilen und den je Verteiler
+    direkt angeschlossenen (ladebereiten) Stationen."""
+    by_id = {b["id"]: b for b in boards_data}
+    children_of: dict[int | None, list[dict]] = {}
+    for b in boards_data:
+        children_of.setdefault(b["parent_board_id"], []).append(b)
+
+    def build(board_id: int) -> BoardNode:
+        b = by_id[board_id]
+        child_nodes = tuple(build(c["id"]) for c in children_of.get(board_id, []))
+        return BoardNode(
+            id=b["id"],
+            fuse_a=b["fuse_a"],
+            priority=b["priority"],
+            children=child_nodes,
+            stations=tuple(alloc_by_board.get(board_id, [])),
+        )
+
+    return build(_root_board(boards_data)["id"])
 
 
 class LoadManagerService:
@@ -116,8 +143,10 @@ class LoadManagerService:
 
     # --- Datenbeschaffung --------------------------------------------------
 
-    def _load_config(self) -> tuple[dict, list[StationSpec], StationSpec | None]:
-        """Lädt Konfiguration, aktive Stationen und optional den Zähler (blockierend)."""
+    def _load_config(
+        self,
+    ) -> tuple[dict, list[StationSpec], StationSpec | None, list[dict]]:
+        """Lädt Konfiguration, aktive Stationen, Zähler und den Verteilungsbaum (blockierend)."""
         with session_scope() as session:
             cfg = GlobalConfig.get_or_create(session)
             cfg_dict = {
@@ -140,6 +169,20 @@ class LoadManagerService:
             )
             specs = [StationSpec.from_station(s) for s in stations]
 
+            # Wurzel (Hauptverteilung) garantiert vorhanden; Default-Absicherung
+            # = aktuelle Netzgrenze, damit Bestandsinstallationen ohne
+            # Unterverteiler unverändert weiterlaufen.
+            DistributionBoard.get_or_create_root(session, default_fuse_a=cfg.grid_limit_current_a)
+            boards_data = [
+                {
+                    "id": b.id,
+                    "parent_board_id": b.parent_board_id,
+                    "fuse_a": b.incoming_fuse_a,
+                    "priority": b.priority,
+                }
+                for b in session.query(DistributionBoard).all()
+            ]
+
             meter_spec: StationSpec | None = None
             if cfg.dynamic_meter_enabled and cfg.meter_profile_id and cfg.meter_ip_address:
                 from app.models import DeviceProfile
@@ -159,7 +202,7 @@ class LoadManagerService:
                         min_current_a=0.0,
                         safe_state="block",
                     )
-        return cfg_dict, specs, meter_spec
+        return cfg_dict, specs, meter_spec, boards_data
 
     def _sync_clients(self, specs: list[StationSpec], meter: StationSpec | None) -> None:
         """Erzeugt/entfernt Clients passend zur aktuellen Stationsliste."""
@@ -207,7 +250,7 @@ class LoadManagerService:
     # --- Ein Regelzyklus ---------------------------------------------------
 
     async def _cycle(self) -> float:
-        cfg, specs, meter = await asyncio.to_thread(self._load_config)
+        cfg, specs, meter, boards_data = await asyncio.to_thread(self._load_config)
         self._sync_clients(specs, meter)
 
         # Hysterese-Parameter aktualisieren
@@ -241,11 +284,15 @@ class LoadManagerService:
                 offline_specs.append(spec)
                 self._smoother.reset(spec.id)
 
-        # 3) Effektive Grenze bestimmen (§14a hat Vorrang)
+        # 3) Effektive Grenze bestimmen (§14a hat Vorrang, danach die
+        # Absicherung der Hauptverteilung – beides wirkt zusätzlich zur
+        # bestehenden Netzgrenze, nicht anstelle davon)
+        root_board = _root_board(boards_data)
         effective_limit = cfg["grid_limit_current_a"]
         en14a_active = bool(cfg["en14a_enabled"] and cfg["en14a_active"])
         if en14a_active:
             effective_limit = min(effective_limit, cfg["en14a_limit_current_a"])
+        effective_limit = min(effective_limit, root_board["fuse_a"])
         capacity = {p: effective_limit for p in PHASES}
 
         # 4) Dynamisches Lastmanagement: Grundlast des Hauses abziehen
@@ -259,8 +306,11 @@ class LoadManagerService:
         capacity = safety.subtract_reservations(capacity, offline_specs)
         capacity = safety.clamp_capacity(capacity)
 
-        # 6) Ladebereite Online-Stationen ermitteln + FIFO-Reihenfolge pflegen
-        alloc_stations: list[AllocStation] = []
+        # 6) Ladebereite Online-Stationen ermitteln + FIFO-Reihenfolge pflegen,
+        # gruppiert nach ihrem Verteiler (Abgang) für die hierarchische
+        # Zuteilung. Stationen ohne zugewiesenen Verteiler hängen an der
+        # Wurzel (Hauptverteilung).
+        alloc_by_board: dict[int, list[AllocStation]] = {}
         active_specs: list[StationSpec] = []
         for spec in specs:
             if spec.id not in online_ids:
@@ -272,7 +322,8 @@ class LoadManagerService:
                 self._plug_seq += 1
                 self._plug_order[spec.id] = self._plug_seq
             active_specs.append(spec)
-            alloc_stations.append(
+            board_id = spec.distribution_board_id or root_board["id"]
+            alloc_by_board.setdefault(board_id, []).append(
                 AllocStation(
                     id=spec.id,
                     phases=spec.phases,
@@ -283,8 +334,11 @@ class LoadManagerService:
                 )
             )
 
-        # 7) Verteilung berechnen (harte Grenzgarantie)
-        targets = allocate(alloc_stations, capacity, cfg["distribution_strategy"])
+        # 7) Verteilung berechnen (harte Grenzgarantie auf JEDER Ebene des
+        # Verteilungsbaums, nicht nur an der Wurzel)
+        tree = _build_board_tree(boards_data, alloc_by_board)
+        targets = allocate_tree(tree, capacity, cfg["distribution_strategy"])
+        alloc_stations = [s for stations in alloc_by_board.values() for s in stations]
 
         # 8) Sollwerte glätten und schreiben
         await self._write_setpoints(active_specs, targets)

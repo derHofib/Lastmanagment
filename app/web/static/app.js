@@ -42,11 +42,13 @@ function showView(name) {
   document.querySelectorAll(".view").forEach((v) =>
     v.classList.toggle("active", v.id === name));
   if (name === "stations") loadStations();
+  if (name === "boards") loadBoards();
   if (name === "profiles") loadProfiles();
   if (name === "settings") loadSettings();
 }
 
 let profileCache = [];
+let boardCache = [];
 
 // --- Dashboard -------------------------------------------------------------
 async function refreshDashboard() {
@@ -110,9 +112,13 @@ async function refreshDashboard() {
 
 // --- Stationen -------------------------------------------------------------
 async function loadStations() {
-  const [stations, profiles] = await Promise.all([api("/api/stations"), api("/api/profiles")]);
+  const [stations, profiles, boards] = await Promise.all([
+    api("/api/stations"), api("/api/profiles"), api("/api/boards"),
+  ]);
   profileCache = profiles;
+  boardCache = boards;
   const pName = (id) => (profiles.find((p) => p.id === id) || {}).name || "?";
+  const bName = (id) => (boards.find((b) => b.id === id) || {}).name || "Hauptverteilung";
   const phaseTxt = { "1p_l1": "1p L1", "1p_l2": "1p L2", "1p_l3": "1p L3", "3p": "3-phasig" };
   document.getElementById("stations-tbody").innerHTML = stations.map((s) => `
     <tr>
@@ -120,6 +126,7 @@ async function loadStations() {
       <td>${esc(s.ip_address)}:${s.tcp_port}</td>
       <td>${s.unit_id}</td>
       <td>${esc(pName(s.profile_id))}</td>
+      <td>${esc(bName(s.distribution_board_id))}${s.circuit_breaker_a != null ? `<div class="muted">Abgang: ${nf.format(s.circuit_breaker_a)} A</div>` : ""}</td>
       <td>${phaseTxt[s.phase_config]}</td>
       <td>${s.priority}</td>
       <td>${nf.format(s.min_current_a)} / ${nf.format(s.max_current_a)}</td>
@@ -129,19 +136,23 @@ async function loadStations() {
         <button class="btn small secondary" onclick='openStation(${s.id})'>Bearb.</button>
         <button class="btn small danger" onclick='deleteStation(${s.id})'>Löschen</button>
       </td>
-    </tr>`).join("") || '<tr><td colspan="9" class="muted">Noch keine Stationen.</td></tr>';
+    </tr>`).join("") || '<tr><td colspan="10" class="muted">Noch keine Stationen.</td></tr>';
 }
 
 async function openStation(id) {
   if (!profileCache.length) profileCache = await api("/api/profiles");
   if (!profileCache.length) { toast("Bitte zuerst ein Geräteprofil anlegen.", true); return; }
+  if (!boardCache.length) boardCache = await api("/api/boards");
   const s = id ? await api("/api/stations/" + id) : {
     name: "", location: "", ip_address: "", tcp_port: 502, unit_id: 1,
     profile_id: profileCache[0].id, phase_config: "3p", priority: 0,
     max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "block",
+    distribution_board_id: null, circuit_breaker_a: null,
   };
   const opts = profileCache.map((p) =>
     `<option value="${p.id}" ${p.id === s.profile_id ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  const boardOpts = boardCache.map((b) =>
+    `<option value="${b.id}" ${b.id === s.distribution_board_id ? "selected" : ""}>${esc(b.name)}</option>`).join("");
   const dlg = document.getElementById("station-dialog");
   dlg.innerHTML = `
     <h2>${id ? "Station bearbeiten" : "Neue Station"}</h2>
@@ -164,6 +175,11 @@ async function openStation(id) {
       <div class="field"><label>Priorität</label><input id="st-prio" type="number" value="${s.priority}"></div>
     </div>
     <div class="row">
+      <div class="field"><label>Verteiler (Abgang hängt an)</label><select id="st-board">${boardOpts}</select></div>
+      <div class="field"><label>Absicherung Abgang (A)</label>
+        <input id="st-breaker" type="number" step="0.1" value="${s.circuit_breaker_a ?? ""}" placeholder="optional"></div>
+    </div>
+    <div class="row">
       <div class="field"><label>Min-Strom (A)</label><input id="st-min" type="number" step="0.1" value="${s.min_current_a}"></div>
       <div class="field"><label>Max-Strom (A)</label><input id="st-max" type="number" step="0.1" value="${s.max_current_a}"></div>
       <div class="field"><label>Fail-Safe</label>
@@ -177,6 +193,9 @@ async function openStation(id) {
           <option value="false" ${!s.enabled ? "selected" : ""}>nein</option>
         </select></div>
     </div>
+    <p class="small-note">Die Absicherung des Abgangs ist die Installationssicherung
+      des Kabels zur Station – getrennt vom technischen Max-Strom der Wallbox selbst.
+      Leer lassen, wenn keine gesonderte Abgangssicherung bekannt ist.</p>
     <div class="row" style="justify-content:flex-end;margin-top:8px">
       <button class="btn secondary" onclick="document.getElementById('station-dialog').close()">Abbrechen</button>
       <button class="btn" onclick="saveStation(${id || 0})">Speichern</button>
@@ -191,6 +210,8 @@ async function saveStation(id) {
     profile_id: +val("st-profile"), phase_config: val("st-phase"),
     priority: +val("st-prio"), min_current_a: +val("st-min"), max_current_a: +val("st-max"),
     safe_state: val("st-safe"), enabled: val("st-enabled") === "true",
+    distribution_board_id: val("st-board") ? +val("st-board") : null,
+    circuit_breaker_a: val("st-breaker") ? +val("st-breaker") : null,
   };
   try {
     await api(id ? "/api/stations/" + id : "/api/stations",
@@ -218,6 +239,107 @@ async function testStation(id) {
       toast("Test fehlgeschlagen: " + (r.error || "keine Antwort"), true);
     }
   } catch (e) { toast(e.message, true); }
+}
+
+// --- Verteilung (Hauptverteilung / Unterverteilung / Abgänge) -------------
+
+function renderBoardNode(node) {
+  const bars = PHASES.map((p) => {
+    const load = node.load_a[p] || 0;
+    const pct = node.incoming_fuse_a > 0 ? Math.min(100, (load / node.incoming_fuse_a) * 100) : 0;
+    const warn = pct >= 90;
+    return `<div class="mini-bar">
+      <div class="label"><span>${p}</span><span>${nf.format(load)}/${nf.format(node.incoming_fuse_a)} A</span></div>
+      <div class="bar-track"><div class="bar-fill ${warn ? "warn" : ""}" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join("");
+
+  const stationRows = node.stations.map((s) => `
+    <div class="station-row">
+      <span>${esc(s.name)}${s.circuit_breaker_a != null ? ` <span class="muted">(Abgang ${nf.format(s.circuit_breaker_a)} A)</span>` : ""}</span>
+      <span>${s.online
+        ? (s.setpoint_a != null ? nf.format(s.setpoint_a) + " A" : '<span class="badge ok">online</span>')
+        : '<span class="badge err">offline</span>'}</span>
+    </div>`).join("");
+
+  const childrenHtml = node.children.map(renderBoardNode).join("");
+
+  return `
+    <div class="tree-node">
+      <div class="tree-header">
+        <div>
+          <span class="tree-title">${esc(node.name)}</span>
+          <span class="tree-fuse">Absicherung ${nf.format(node.incoming_fuse_a)} A${node.location ? " · " + esc(node.location) : ""}</span>
+        </div>
+        <div>
+          <button class="btn small secondary" onclick="openBoard(0, ${node.id})">+ Unterverteilung</button>
+          <button class="btn small secondary" onclick="openBoard(${node.id})">Bearb.</button>
+          <button class="btn small danger" onclick="deleteBoard(${node.id})">Löschen</button>
+        </div>
+      </div>
+      <div class="tree-phase-bars">${bars}</div>
+      ${stationRows ? `<div class="tree-station-list">${stationRows}</div>` : ""}
+      ${childrenHtml ? `<div class="tree-children">${childrenHtml}</div>` : ""}
+    </div>`;
+}
+
+async function loadBoards() {
+  const tree = await api("/api/boards/tree");
+  document.getElementById("board-tree").innerHTML = renderBoardNode(tree);
+  boardCache = await api("/api/boards");
+}
+
+async function openBoard(id, presetParentId) {
+  if (!boardCache.length) boardCache = await api("/api/boards");
+  const rootId = boardCache.find((x) => x.parent_board_id === null)?.id ?? null;
+  const b = id ? await api("/api/boards/" + id) : {
+    name: "", parent_board_id: presetParentId ?? rootId,
+    incoming_fuse_a: 35, priority: 0, location: "", notes: "",
+  };
+  const isRoot = id && b.parent_board_id === null;
+  const parentOpts = boardCache
+    .filter((x) => x.id !== id)
+    .map((x) => `<option value="${x.id}" ${x.id === b.parent_board_id ? "selected" : ""}>${esc(x.name)}</option>`)
+    .join("");
+  const dlg = document.getElementById("board-dialog");
+  dlg.innerHTML = `
+    <h2>${id ? "Verteiler bearbeiten" : "Neue Unterverteilung"}</h2>
+    <div class="row">
+      <div class="field"><label>Name</label><input id="b-name" value="${esc(b.name)}"></div>
+      ${isRoot ? "" : `<div class="field"><label>Übergeordneter Verteiler</label><select id="b-parent">${parentOpts}</select></div>`}
+    </div>
+    <div class="row">
+      <div class="field"><label>Absicherung (A, je Phase)</label><input id="b-fuse" type="number" step="0.1" value="${b.incoming_fuse_a}"></div>
+      <div class="field"><label>Priorität</label><input id="b-prio" type="number" value="${b.priority}"></div>
+      <div class="field"><label>Standort</label><input id="b-loc" value="${esc(b.location || "")}"></div>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button class="btn secondary" onclick="document.getElementById('board-dialog').close()">Abbrechen</button>
+      <button class="btn" onclick="saveBoard(${id || 0}, ${isRoot ? "true" : "false"})">Speichern</button>
+    </div>`;
+  dlg.showModal();
+}
+
+async function saveBoard(id, isRoot) {
+  const body = {
+    name: val("b-name"),
+    parent_board_id: isRoot ? null : +val("b-parent"),
+    incoming_fuse_a: +val("b-fuse"), priority: +val("b-prio"),
+    location: val("b-loc") || null,
+  };
+  try {
+    await api(id ? "/api/boards/" + id : "/api/boards",
+      { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    document.getElementById("board-dialog").close();
+    toast("Verteiler gespeichert.");
+    loadBoards();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteBoard(id) {
+  if (!confirm("Verteiler wirklich löschen?")) return;
+  try { await api("/api/boards/" + id, { method: "DELETE" }); toast("Gelöscht."); loadBoards(); }
+  catch (e) { toast(e.message, true); }
 }
 
 // --- Profile ---------------------------------------------------------------

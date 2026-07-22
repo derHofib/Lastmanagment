@@ -52,6 +52,32 @@ def init_db() -> None:
     import app.models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_new_columns()
+
+
+# Leichtgewichtiger Kompatibilitäts-Check ohne volles Migrationsframework:
+# create_all() legt fehlende TABELLEN an, ergänzt aber keine SPALTEN an
+# bereits existierenden Tabellen. Diese Spalten kamen nach dem ersten Release
+# hinzu (Verteilungshierarchie) und müssen bei bestehenden SQLite-Dateien
+# nachträglich ergänzt werden.
+_NEW_COLUMNS = {
+    "charging_stations": [
+        ("distribution_board_id", "INTEGER REFERENCES distribution_boards(id)"),
+        ("circuit_breaker_a", "FLOAT"),
+    ],
+}
+
+
+def _ensure_new_columns() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    with engine.connect() as conn:
+        for table, columns in _NEW_COLUMNS.items():
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            for name, ddl_type in columns:
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
+        conn.commit()
 
 
 def get_session() -> Iterator[Session]:

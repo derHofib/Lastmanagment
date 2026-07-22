@@ -8,8 +8,10 @@ import pytest
 
 from app.loadmanager.engine import (
     AllocStation,
+    BoardNode,
     PHASES,
     allocate,
+    allocate_tree,
     phase_totals,
 )
 from app.loadmanager.smoothing import SetpointSmoother
@@ -217,3 +219,125 @@ def test_smoother_pause_always_immediate():
     sm.desired(1, 16.0)
     # Pausieren (0 A) muss trotz min_change durchkommen
     assert sm.desired(1, 0.0) == 0.0
+
+
+# --- Verteilungshierarchie (Hauptverteilung / Unterverteilung) ------------
+
+def subtree_phase_totals(node: BoardNode, assignment: dict) -> dict:
+    """Summiert die Ströme aller Stationen im Teilbaum eines Knotens je Phase."""
+    totals = {p: 0.0 for p in PHASES}
+    for st in node.stations:
+        v = assignment.get(st.id, 0.0)
+        for p in st.phases:
+            totals[p] += v
+    for child in node.children:
+        child_totals = subtree_phase_totals(child, assignment)
+        for p in PHASES:
+            totals[p] += child_totals[p]
+    return totals
+
+
+def assert_tree_within_limits(node: BoardNode, assignment: dict) -> None:
+    """Prüft rekursiv, dass an JEDEM Knoten des Baums dessen Absicherung
+    (fuse_a) je Phase eingehalten wird – die zentrale Garantie von
+    allocate_tree()."""
+    totals = subtree_phase_totals(node, assignment)
+    for p in PHASES:
+        assert totals[p] <= node.fuse_a + 1e-6, (
+            f"Verteiler {node.id}: Phase {p} überschritten "
+            f"({totals[p]} > {node.fuse_a})"
+        )
+    for child in node.children:
+        assert_tree_within_limits(child, assignment)
+
+
+def test_allocate_tree_without_subboards_matches_flat_allocate():
+    # Ohne Unterverteiler muss allocate_tree() exakt allocate() entsprechen
+    # (keine Regression für bestehende, einfache Installationen).
+    stations = (s(1), s(2), s(3, mx=16))
+    root = BoardNode(id=1, fuse_a=63, stations=stations)
+    capacity = cap(63, 63, 63)
+
+    tree_result = allocate_tree(root, capacity, DistributionStrategy.EQUAL)
+    flat_result = allocate(list(stations), capacity, DistributionStrategy.EQUAL)
+
+    assert tree_result == flat_result
+    assert_tree_within_limits(root, tree_result)
+
+
+def test_allocate_tree_middle_level_bottleneck():
+    # Zwei Stationen (je max 32 A) hängen an einer Unterverteilung mit nur
+    # 20 A Absicherung -> trotz reichlich Kapazität an Wurzel (100 A) und an
+    # den Stationen selbst (32 A) begrenzt die Unterverteilung auf 20 A/2.
+    leaf_a = s(10, mx=32)
+    leaf_b = s(11, mx=32)
+    sub = BoardNode(id=2, fuse_a=20, stations=(leaf_a, leaf_b))
+    sibling_station = s(20, mx=32)
+    root = BoardNode(id=1, fuse_a=100, children=(sub,), stations=(sibling_station,))
+
+    result = allocate_tree(root, cap(100, 100, 100), DistributionStrategy.EQUAL)
+
+    assert result[10] == 10
+    assert result[11] == 10
+    assert result[20] == 32  # nicht durch die Unterverteilung begrenzt
+    assert_tree_within_limits(root, result)
+
+
+def test_allocate_tree_mixed_single_and_three_phase_under_subboard():
+    # Zwei 1-phasige Stationen (beide L1) + eine 3-phasige Station teilen
+    # sich eine Unterverteilung mit 20 A Absicherung.
+    single_a = s(30, phases=("L1",), mx=16)
+    single_b = s(31, phases=("L1",), mx=16)
+    three_phase = s(32, phases=PHASES, mx=16)
+    sub = BoardNode(id=5, fuse_a=20, stations=(single_a, single_b, three_phase))
+    root = BoardNode(id=1, fuse_a=100, children=(sub,))
+
+    result = allocate_tree(root, cap(100, 100, 100), DistributionStrategy.EQUAL)
+
+    # Symmetrie: beide identischen 1-phasigen Stationen bekommen denselben Wert
+    assert result[30] == result[31]
+    # Die 3-phasige Station teilt sich L1 mit den beiden anderen und wird
+    # dadurch auf denselben Wert eingefroren (ein Sollwert gilt für alle
+    # ihre Phasen gleichermaßen).
+    assert result[32] == result[30]
+    assert_tree_within_limits(root, result)
+
+
+@pytest.mark.parametrize("strategy", list(DistributionStrategy))
+def test_allocate_tree_random_never_exceeds_any_node(strategy):
+    import random
+    rng = random.Random(7)
+    phase_opts = [("L1",), ("L2",), ("L3",), PHASES]
+
+    def random_stations(ids, order_offset):
+        return tuple(
+            s(i, phases=rng.choice(phase_opts), mn=6,
+              mx=rng.choice([16, 22, 32]), prio=rng.randint(0, 5),
+              order=order_offset + i)
+            for i in ids
+        )
+
+    leaf_a = BoardNode(id=101, fuse_a=rng.choice([16, 25, 32]),
+                       priority=rng.randint(0, 3),
+                       stations=random_stations(range(1, 4), 0))
+    leaf_b = BoardNode(id=102, fuse_a=rng.choice([16, 25, 32]),
+                       priority=rng.randint(0, 3),
+                       stations=random_stations(range(4, 7), 10))
+    mid = BoardNode(id=10, fuse_a=rng.choice([20, 32, 40]),
+                    priority=rng.randint(0, 3),
+                    children=(leaf_a, leaf_b),
+                    stations=random_stations(range(7, 9), 20))
+    root = BoardNode(id=1, fuse_a=rng.choice([32, 50, 63]),
+                     children=(mid,), stations=random_stations(range(9, 11), 30))
+
+    result = allocate_tree(root, cap(63, 63, 63), strategy)
+
+    assert_tree_within_limits(root, result)
+    # Minimalstrom-Regel gilt auch innerhalb des Baums
+    all_stations = {
+        st.id: st
+        for node in (leaf_a, leaf_b, mid, root)
+        for st in node.stations
+    }
+    for sid, st in all_stations.items():
+        assert result[sid] == 0 or result[sid] >= st.min_current_a

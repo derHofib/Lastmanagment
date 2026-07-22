@@ -99,6 +99,58 @@ class ProfileImport(BaseModel):
     registers: list[RegisterMappingCreate] = Field(default_factory=list)
 
 
+# --- Verteilungshierarchie ---------------------------------------------
+
+class DistributionBoardBase(BaseModel):
+    name: str = Field(..., max_length=120)
+    parent_board_id: int | None = None
+    incoming_fuse_a: float = Field(63.0, ge=0)
+    priority: int = 0
+    location: str | None = Field(None, max_length=120)
+    notes: str | None = Field(None, max_length=1000)
+
+
+class DistributionBoardCreate(DistributionBoardBase):
+    pass
+
+
+class DistributionBoardUpdate(DistributionBoardBase):
+    pass
+
+
+class DistributionBoardRead(DistributionBoardBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+
+
+class BoardTreeStation(BaseModel):
+    """Eine Ladestation als Blatt im Verteilungsbaum, inkl. Live-Auslastung."""
+
+    id: int
+    name: str
+    circuit_breaker_a: float | None = None
+    max_current_a: float
+    online: bool = False
+    setpoint_a: float | None = None
+
+
+class BoardTreeNode(BaseModel):
+    """Ein Verteiler-Knoten im Baum, rekursiv mit Kindern und Stationen."""
+
+    id: int
+    name: str
+    incoming_fuse_a: float
+    priority: int
+    location: str | None = None
+    # Aktuelle Auslastung je Phase innerhalb des gesamten Teilbaums
+    load_a: dict[str, float] = Field(default_factory=dict)
+    stations: list[BoardTreeStation] = Field(default_factory=list)
+    children: list["BoardTreeNode"] = Field(default_factory=list)
+
+
+BoardTreeNode.model_rebuild()
+
+
 # --- Ladestation -----------------------------------------------------------
 
 class ChargingStationBase(BaseModel):
@@ -114,6 +166,12 @@ class ChargingStationBase(BaseModel):
     min_current_a: float = Field(6.0, ge=0)
     enabled: bool = True
     safe_state: SafeState = SafeState.BLOCK
+    # An welchem Verteiler hängt der Abgang zu dieser Station? None = Wurzel
+    # (Hauptverteilung).
+    distribution_board_id: int | None = None
+    # Absicherung DES ABGANGS zur Ladestation (Installationssicherung),
+    # separat von max_current_a (technische Grenze der Wallbox selbst).
+    circuit_breaker_a: float | None = Field(None, ge=0)
 
     @model_validator(mode="after")
     def _check_currents(self):

@@ -112,3 +112,105 @@ def test_status_endpoint(client):
 
 def test_healthz(client):
     assert client.get("/healthz").json()["status"] == "ok"
+
+
+# --- Verteilungshierarchie (Hauptverteilung/Unterverteilung) --------------
+
+def test_boards_root_auto_created(client):
+    r = client.get("/api/boards")
+    assert r.status_code == 200
+    boards = r.json()
+    assert len(boards) == 1
+    assert boards[0]["parent_board_id"] is None
+    assert boards[0]["name"] == "Hauptverteilung"
+
+
+def test_board_create_requires_parent(client):
+    # Ohne parent_board_id -> abgelehnt (Wurzel wird nur automatisch verwaltet)
+    r = client.post("/api/boards", json={"name": "UV Garage", "incoming_fuse_a": 35})
+    assert r.status_code == 400
+
+
+def test_board_crud_and_hierarchy(client):
+    root_id = client.get("/api/boards").json()[0]["id"]
+
+    r = client.post("/api/boards", json={
+        "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
+    })
+    assert r.status_code == 201, r.text
+    uv_id = r.json()["id"]
+
+    # Unbekannter parent_board_id -> 400
+    assert client.post("/api/boards", json={
+        "name": "X", "parent_board_id": 9999, "incoming_fuse_a": 16,
+    }).status_code == 400
+
+    # Verschachtelte Unterverteilung
+    r = client.post("/api/boards", json={
+        "name": "UV Garage - Zweig", "parent_board_id": uv_id, "incoming_fuse_a": 16,
+    })
+    assert r.status_code == 201
+    sub_id = r.json()["id"]
+
+    # Zyklus verhindern: UV Garage kann nicht ihrem eigenen Kind unterstellt werden
+    r = client.put(f"/api/boards/{uv_id}", json={
+        "name": "UV Garage", "parent_board_id": sub_id, "incoming_fuse_a": 35,
+    })
+    assert r.status_code == 400
+
+    # Wurzel-Status kann nicht geändert werden
+    r = client.put(f"/api/boards/{root_id}", json={
+        "name": "Hauptverteilung", "parent_board_id": uv_id, "incoming_fuse_a": 63,
+    })
+    assert r.status_code == 400
+
+    # Löschen mit Kind-Verteiler verboten
+    assert client.delete(f"/api/boards/{uv_id}").status_code == 409
+    # Blatt-Verteiler ohne Kinder/Stationen löschbar
+    assert client.delete(f"/api/boards/{sub_id}").status_code == 204
+    assert client.delete(f"/api/boards/{uv_id}").status_code == 204
+
+    # Wurzel kann nicht gelöscht werden
+    assert client.delete(f"/api/boards/{root_id}").status_code == 409
+
+
+def test_station_with_board_and_circuit_breaker(client):
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+    root_id = client.get("/api/boards").json()[0]["id"]
+    uv_id = client.post("/api/boards", json={
+        "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
+    }).json()["id"]
+
+    station = {
+        "name": "Garage links", "ip_address": "192.168.1.50", "profile_id": pid,
+        "distribution_board_id": uv_id, "circuit_breaker_a": 16,
+        "max_current_a": 32, "min_current_a": 6,
+    }
+    r = client.post("/api/stations", json=station)
+    assert r.status_code == 201, r.text
+    assert r.json()["circuit_breaker_a"] == 16
+    sid = r.json()["id"]
+
+    # Unbekannter Verteiler -> 400
+    bad = dict(station, distribution_board_id=9999)
+    assert client.post("/api/stations", json=bad).status_code == 400
+
+    # Verteiler mit zugewiesener Station kann nicht gelöscht werden
+    assert client.delete(f"/api/boards/{uv_id}").status_code == 409
+
+    client.delete(f"/api/stations/{sid}")
+    assert client.delete(f"/api/boards/{uv_id}").status_code == 204
+
+
+def test_board_tree_endpoint(client):
+    root_id = client.get("/api/boards").json()[0]["id"]
+    client.post("/api/boards", json={
+        "name": "UV Garage", "parent_board_id": root_id, "incoming_fuse_a": 35,
+    })
+    r = client.get("/api/boards/tree")
+    assert r.status_code == 200
+    tree = r.json()
+    assert tree["name"] == "Hauptverteilung"
+    assert len(tree["children"]) == 1
+    assert tree["children"][0]["name"] == "UV Garage"
+    assert set(tree["load_a"]) == {"L1", "L2", "L3"}

@@ -88,3 +88,22 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 #toast.show { opacity: 1; }
 #toast.err { border-left-color: var(--err); }
 .small-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* Verteilungsbaum (Hauptverteilung / Unterverteilung / Abgänge) */
+.tree-node {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  margin: 8px 0; background: var(--panel2);
+}
+.tree-children { margin-left: 26px; border-left: 2px dashed var(--border); padding-left: 14px; }
+.tree-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tree-title { font-weight: 600; }
+.tree-fuse { color: var(--muted); font-size: 13px; }
+.tree-phase-bars { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.tree-phase-bars .mini-bar { flex: 1 1 90px; min-width: 80px; }
+.tree-phase-bars .mini-bar .label { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.tree-phase-bars .bar-track { height: 10px; }
+.tree-station-list { margin-top: 8px; font-size: 13px; }
+.tree-station-list .station-row {
+  display: flex; justify-content: space-between; gap: 8px; padding: 4px 0;
+  border-top: 1px dashed var(--border);
+}

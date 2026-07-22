@@ -27,6 +27,17 @@ class ChargingStation(Base):
         ForeignKey("device_profiles.id"), nullable=False
     )
 
+    # An welchem Verteiler hängt der Abgang zu dieser Station? None = Wurzel
+    # (Hauptverteilung) – siehe app.models.distribution_board.
+    distribution_board_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distribution_boards.id"), nullable=True
+    )
+    # Absicherung DES ABGANGS zur Ladestation (Installationssicherung des
+    # Kabels), separat von max_current_a (technische Grenze der Wallbox
+    # selbst). None = keine gesonderte Abgangssicherung hinterlegt, dann
+    # zählt nur max_current_a (Bestandsverhalten).
+    circuit_breaker_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Phasenanschluss bestimmt, welche Phasen die Box belastet
     phase_config: Mapped[PhaseConfig] = mapped_column(
         Enum(PhaseConfig), default=PhaseConfig.P3, nullable=False

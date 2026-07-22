@@ -31,6 +31,23 @@ class AllocStation:
     order: int = 0  # FIFO-Reihenfolge (Steckzeitpunkt); kleiner = früher
 
 
+@dataclass(frozen=True)
+class BoardNode:
+    """Ein Knoten im Verteilungsbaum (Hauptverteilung oder Unterverteilung).
+
+    Direkt angeschlossene Stationen (``stations``) und Kind-Verteiler
+    (``children``) werden bei der Zuteilung wie Geschwister behandelt – ein
+    Kind-Verteiler tritt dabei als virtuelle 3-phasige Station auf (siehe
+    :func:`allocate_tree`), begrenzt durch seine eigene ``fuse_a``.
+    """
+
+    id: int
+    fuse_a: float
+    priority: int = 0
+    children: tuple["BoardNode", ...] = ()
+    stations: tuple[AllocStation, ...] = ()
+
+
 def _allocate_greedy(
     stations: list[AllocStation],
     capacity: dict[str, float],
@@ -167,6 +184,56 @@ def allocate(
         else:
             value = min(value, s.max_current_a)
         result[s.id] = float(value)
+    return result
+
+
+def allocate_tree(
+    root: BoardNode,
+    root_capacity: dict[str, float],
+    strategy: DistributionStrategy,
+    floor_amps: bool = True,
+) -> dict[int, float]:
+    """Verteilt rekursiv top-down über die Verteilungshierarchie.
+
+    An jedem Knoten werden die direkt angeschlossenen Stationen und die
+    Kind-Verteiler gemeinsam per :func:`allocate` verteilt – ein
+    Kind-Verteiler tritt dabei als virtuelle 3-phasige Station auf
+    (``max_current_a = fuse_a``, ``min_current_a = 0`` – ein Verteiler
+    pausiert nie, er bekommt einfach so viel wie zugeteilt, auch 0 A). Was
+    ihm zugeteilt wird, reicht er anschließend als eigene Kapazität an
+    seinen Teilbaum weiter.
+
+    Ohne Unterverteiler (nur Wurzel mit direkt angeschlossenen Stationen)
+    reduziert sich das auf einen einzigen ``allocate()``-Aufruf – identisches
+    Verhalten wie vorher.
+
+    Virtuelle Stations-IDs für Verteiler-Zweige (``-board.id``) liegen in
+    einem zu echten Stations-IDs disjunkten Namensraum (Stations-IDs sind
+    stets positive Datenbank-Primärschlüssel).
+    """
+    result: dict[int, float] = {}
+
+    def recurse(node: BoardNode, capacity: dict[str, float]) -> None:
+        virtual_children = [
+            AllocStation(
+                id=-child.id,
+                phases=PHASES,
+                min_current_a=0.0,
+                max_current_a=child.fuse_a,
+                priority=child.priority,
+            )
+            for child in node.children
+        ]
+        combined = list(node.stations) + virtual_children
+        targets = allocate(combined, capacity, strategy, floor_amps=floor_amps)
+
+        for station in node.stations:
+            result[station.id] = targets[station.id]
+        for child in node.children:
+            given = targets[-child.id]
+            recurse(child, {p: given for p in PHASES})
+
+    recurse(root, root_capacity)
     return result
 
 

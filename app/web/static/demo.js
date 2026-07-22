@@ -12,7 +12,7 @@
 (function () {
   if (!window.LM_DEMO) return;
 
-  const LS_KEY = "lm_demo_state_v2";
+  const LS_KEY = "lm_demo_state_v3";
   const PHASES = ["L1", "L2", "L3"];
 
   // --- Seed-Daten (entspricht examples/beispiel_wallbox.json) --------------
@@ -31,6 +31,11 @@
     return {
       seqProfile: 2,
       seqStation: 3,
+      seqBoard: 3,
+      boards: [
+        { id: 1, name: "Hauptverteilung", parent_board_id: null, incoming_fuse_a: 63, priority: 0, location: "Hausanschluss", notes: null },
+        { id: 2, name: "UV Garage", parent_board_id: 1, incoming_fuse_a: 35, priority: 0, location: "Carport", notes: null },
+      ],
       config: {
         id: 1, grid_limit_current_a: 32, management_mode: "static",
         distribution_strategy: "equal", poll_interval_s: 3,
@@ -45,8 +50,8 @@
         registers,
       }],
       stations: [
-        { id: 1, name: "Garage links", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "block" },
-        { id: 2, name: "Garage rechts", location: "Carport", ip_address: "192.168.1.51", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 1, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "min_current" },
+        { id: 1, name: "Garage links", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "block", distribution_board_id: 2, circuit_breaker_a: 16 },
+        { id: 2, name: "Garage rechts", location: "Carport", ip_address: "192.168.1.51", tcp_port: 502, unit_id: 1, profile_id: 1, phase_config: "3p", priority: 1, max_current_a: 32, min_current_a: 6, enabled: true, safe_state: "min_current", distribution_board_id: 2, circuit_breaker_a: 16 },
       ],
     };
   }
@@ -146,6 +151,53 @@
     };
   }
 
+  // --- Verteilungsbaum (vereinfacht: nutzt die flache allocate()-Simulation
+  // oben, prüft im Demo-Modus KEINE Absicherung je Baumebene – nur die
+  // echte Anwendung (app/loadmanager/engine.allocate_tree) tut das) --------
+  function buildBoardTree() {
+    const snap = buildStatusSnapshot();
+    const liveByStation = {};
+    snap.stations.forEach((s) => (liveByStation[s.station_id] = s));
+
+    const childrenOf = {};
+    state.boards.forEach((b) => {
+      if (b.parent_board_id != null) {
+        (childrenOf[b.parent_board_id] = childrenOf[b.parent_board_id] || []).push(b);
+      }
+    });
+    const stationsOf = {};
+    state.stations.forEach((s) => {
+      const key = s.distribution_board_id ?? "root";
+      (stationsOf[key] = stationsOf[key] || []).push(s);
+    });
+    const root = state.boards.find((b) => b.parent_board_id === null);
+
+    function build(board) {
+      const isRoot = board.parent_board_id === null;
+      const myStations = (stationsOf[board.id] || []).concat(isRoot ? (stationsOf["root"] || []) : []);
+      const load = { L1: 0, L2: 0, L3: 0 };
+      const stationNodes = myStations.map((s) => {
+        const live = liveByStation[s.id] || {};
+        if (live.online) phasesOf(s.phase_config).forEach((p) => (load[p] += live.setpoint_a || 0));
+        return {
+          id: s.id, name: s.name, circuit_breaker_a: s.circuit_breaker_a ?? null,
+          max_current_a: s.max_current_a, online: !!live.online, setpoint_a: live.setpoint_a ?? null,
+        };
+      });
+      const childNodes = (childrenOf[board.id] || []).map((c) => {
+        const cn = build(c);
+        PHASES.forEach((p) => (load[p] += cn.load_a[p]));
+        return cn;
+      });
+      return {
+        id: board.id, name: board.name, incoming_fuse_a: board.incoming_fuse_a,
+        priority: board.priority, location: board.location ?? null,
+        load_a: load, stations: stationNodes, children: childNodes,
+      };
+    }
+    return build(root);
+  }
+
   // --- Hilfen für CRUD -----------------------------------------------------
   const json = (data, status = 200) =>
     new Response(status === 204 ? null : JSON.stringify(data),
@@ -197,8 +249,40 @@
       }
     }
 
-    // /api/profiles ...
+    // /api/boards ...
     let m;
+    if (path === "/api/boards" && method === "GET") return json(state.boards);
+    if (path === "/api/boards" && method === "POST") return createBoard(body);
+    if (path === "/api/boards/tree" && method === "GET") return json(buildBoardTree());
+    if ((m = path.match(/^\/api\/boards\/(\d+)$/))) {
+      const id = +m[1];
+      const idx = state.boards.findIndex((b) => b.id === id);
+      if (idx < 0) return err(404, "Verteiler nicht gefunden");
+      if (method === "GET") return json(state.boards[idx]);
+      if (method === "PUT") {
+        const existing = state.boards[idx];
+        if ((existing.parent_board_id === null) !== (body.parent_board_id === null))
+          return err(400, "Der Wurzel-Status eines Verteilers kann nicht geändert werden");
+        if (body.parent_board_id != null && !state.boards.some((b) => b.id === body.parent_board_id))
+          return err(400, `Übergeordneter Verteiler ${body.parent_board_id} existiert nicht`);
+        state.boards[idx] = { id, ...body };
+        save(state);
+        return json(state.boards[idx]);
+      }
+      if (method === "DELETE") {
+        if (state.boards[idx].parent_board_id === null)
+          return err(409, "Die Hauptverteilung kann nicht gelöscht werden");
+        if (state.boards.some((b) => b.parent_board_id === id))
+          return err(409, "Verteiler hat noch Unterverteilungen");
+        if (state.stations.some((s) => s.distribution_board_id === id))
+          return err(409, "Verteiler hat noch zugewiesene Ladestationen");
+        state.boards.splice(idx, 1);
+        save(state);
+        return json(null, 204);
+      }
+    }
+
+    // /api/profiles ...
     if (path === "/api/profiles" && method === "GET") return json(state.profiles);
     if (path === "/api/profiles" && method === "POST") return createProfile(body);
     if (path === "/api/profiles/import" && method === "POST") return createProfile(body);
@@ -280,6 +364,16 @@
     state.profiles.push(p);
     save(state);
     return json(p, 201);
+  }
+  function createBoard(body) {
+    if (body.parent_board_id == null)
+      return err(400, "Neue Verteiler benötigen einen übergeordneten Verteiler");
+    if (!state.boards.some((b) => b.id === body.parent_board_id))
+      return err(400, `Übergeordneter Verteiler ${body.parent_board_id} existiert nicht`);
+    const b = { id: state.seqBoard++, ...body };
+    state.boards.push(b);
+    save(state);
+    return json(b, 201);
   }
   function createStation(body) {
     if (!state.profiles.some((p) => p.id === body.profile_id))
