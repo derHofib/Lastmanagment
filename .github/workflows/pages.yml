@@ -42,12 +42,13 @@ jobs:
           # Jekyll-Verarbeitung deaktivieren
           touch _site/.nojekyll
 
-      # Voraussetzung (einmalig): In den Repo-Einstellungen unter
-      # Settings → Pages → "Build and deployment" → Source = "GitHub Actions".
-      # Der Actions-Token darf Pages nicht selbst aktivieren, daher kein
-      # enablement:true (das schlägt mit "Resource not accessible" fehl).
+      # Aktiviert Pages automatisch (funktioniert auf öffentlichen Repos mit
+      # pages:write-Berechtigung). Falls dies fehlschlägt, Pages einmalig
+      # manuell aktivieren: Settings → Pages → Source = "GitHub Actions".
       - name: Pages konfigurieren
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Artefakt hochladen
         uses: actions/upload-pages-artifact@v3
