@@ -79,9 +79,12 @@ async function refreshDashboard() {
 
   const rows = status.stations.map((s) => {
     const v = s.values || {};
-    const ist = ["current_l1", "current_l2", "current_l3"]
-      .map((k) => v[k]).filter((x) => typeof x === "number");
-    const istSum = ist.reduce((a, b) => a + b, 0);
+    // Wichtig: Ströme verschiedener Phasen dürfen NICHT addiert werden (keine
+    // elektrotechnisch sinnvolle Größe, da L1/L2/L3 i. d. R. unsymmetrisch
+    // belastet sind). Stattdessen jede vorhandene Phase einzeln ausweisen.
+    const perPhase = [["L1", "current_l1"], ["L2", "current_l2"], ["L3", "current_l3"]]
+      .map(([label, key]) => (typeof v[key] === "number" ? `${label}: ${nf.format(v[key])} A` : null))
+      .filter(Boolean);
     let statusBadge;
     if (!s.online) statusBadge = '<span class="badge err">Offline</span>';
     else if (v.charge_status_text) statusBadge = `<span class="badge idle">${esc(v.charge_status_text)}</span>`;
@@ -89,7 +92,7 @@ async function refreshDashboard() {
     return `<tr>
       <td>${esc(s.name)}</td>
       <td>${statusBadge}</td>
-      <td>${ist.length ? nf.format(istSum) + " A" : "–"}</td>
+      <td>${perPhase.length ? perPhase.join(" · ") : "–"}</td>
       <td>${s.setpoint_a != null ? nf.format(s.setpoint_a) + " A" : "–"}</td>
       <td>${typeof v.active_power === "number" ? nf.format(v.active_power) + " W" : "–"}</td>
       <td>${typeof v.energy_total === "number" ? nf2.format(v.energy_total) + " kWh" : "–"}</td>
