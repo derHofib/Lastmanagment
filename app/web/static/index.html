@@ -4,7 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Lastmanagement Ladestationen</title>
-  <link rel="stylesheet" href="/style.css" />
+  <!-- Relative Pfade: funktionieren sowohl unter FastAPI ("/") als auch unter
+       GitHub Pages (Unterpfad /<repo>/). -->
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header>
@@ -90,6 +92,11 @@
   <input type="file" id="import-file" accept="application/json" style="display:none" />
   <div id="toast"></div>
 
-  <script src="/app.js"></script>
+  <!-- config.js setzt window.LM_DEMO (Repo-Default: false). Der Pages-Workflow
+       überschreibt die Datei mit true. demo.js patcht dann fetch() und liefert
+       simulierte API-Daten – muss vor app.js geladen werden. -->
+  <script src="config.js"></script>
+  <script src="demo.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

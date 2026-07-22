@@ -33,6 +33,26 @@ die Weboberfläche/Datenbank anlegen – ohne den Code zu ändern.
 
 ---
 
+## Online-Demo der Weboberfläche (GitHub Pages)
+
+Die **Weboberfläche** lässt sich zum Ansehen/Kontrollieren direkt über GitHub
+Pages hosten. Wichtig: GitHub Pages führt **kein Python-Backend** aus – die
+veröffentlichte Version läuft daher im **Demo-Modus** mit simulierten API-Daten
+im Browser (`app/web/static/demo.js`, aktiviert über `config.js`). Damit sind
+Dashboard, Stationen, Profil-Editor und Einstellungen voll bedienbar; Änderungen
+werden lokal im Browser (localStorage) gehalten. Echte Modbus-Kommunikation
+findet nicht statt – dafür läuft die App auf dem Raspberry Pi.
+
+Einrichtung (einmalig):
+
+1. In GitHub unter **Settings → Pages → Build and deployment → Source** die
+   Option **GitHub Actions** wählen (der Workflow versucht dies auch automatisch).
+2. Der Workflow `.github/workflows/pages.yml` veröffentlicht bei jedem Push die
+   Oberfläche. Die URL erscheint anschließend unter **Settings → Pages** bzw.
+   im Actions-Lauf (typisch `https://<user>.github.io/Lastmanagment/`).
+
+---
+
 ## Architektur / Modulstruktur
 
 ```
