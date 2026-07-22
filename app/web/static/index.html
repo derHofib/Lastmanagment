@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lastmanagement Ladestationen</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>⚡ Lastmanagement</h1>
+    <nav>
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="stations">Ladestationen</button>
+      <button data-view="profiles">Geräteprofile</button>
+      <button data-view="settings">Einstellungen</button>
+    </nav>
+    <span id="cycle-info" class="muted" style="margin-left:auto"></span>
+  </header>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="dashboard" class="view active">
+      <div class="grid">
+        <div class="card">
+          <h2>Gesamtlast pro Phase</h2>
+          <div id="phase-bars"></div>
+        </div>
+        <div class="card">
+          <h2>Systemzustand</h2>
+          <div id="system-info"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Ladepunkte (Live)</h2>
+        <table>
+          <thead>
+            <tr><th>Station</th><th>Status</th><th>Ist-Strom</th><th>Soll-Strom</th><th>Leistung</th><th>Energie</th></tr>
+          </thead>
+          <tbody id="live-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Stationen -->
+    <section id="stations" class="view">
+      <div class="toolbar">
+        <h2>Ladestationen</h2>
+        <button class="btn" onclick="openStation()">+ Neue Station</button>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>IP:Port</th><th>Unit</th><th>Profil</th><th>Phasen</th><th>Prio</th><th>Min/Max A</th><th>Aktiv</th><th></th></tr>
+          </thead>
+          <tbody id="stations-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Profile -->
+    <section id="profiles" class="view">
+      <div class="toolbar">
+        <h2>Geräteprofile (Modbus-Register-Maps)</h2>
+        <div class="row" style="margin:0">
+          <button class="btn secondary" onclick="importProfile()">JSON importieren</button>
+          <button class="btn" onclick="openProfile()">+ Neues Profil</button>
+        </div>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Hersteller</th><th>Unit-ID</th><th>Byte/Word</th><th>Register</th><th></th></tr>
+          </thead>
+          <tbody id="profiles-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Einstellungen -->
+    <section id="settings" class="view">
+      <h2>Globale Einstellungen</h2>
+      <div class="card" id="settings-form"></div>
+    </section>
+  </main>
+
+  <!-- Dialoge -->
+  <dialog id="station-dialog"></dialog>
+  <dialog id="profile-dialog"></dialog>
+  <input type="file" id="import-file" accept="application/json" style="display:none" />
+  <div id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

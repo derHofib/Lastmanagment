@@ -1,0 +1,26 @@
+# Beispiel-Infrastrukturkonfiguration
+# Kopieren nach config.yaml und anpassen. Alternativ per Umgebungsvariablen
+# (Präfix LM_) setzen. Betriebliche Grenzwerte (Netzgrenze, Modus, Strategie)
+# werden NICHT hier, sondern über die Weboberfläche/Datenbank gepflegt.
+
+# Persistenz (SQLite-Datei)
+database_url: "sqlite:///lastmanagement.db"
+
+# HTTP-Server
+host: "0.0.0.0"
+port: 8000
+
+# Modbus-Netzwerk-Defaults (pro Station in der DB überschreibbar)
+modbus_timeout_s: 3.0
+modbus_retries: 2
+
+# Standard-Polling-Intervall (falls DB-Wert nicht gesetzt)
+default_poll_interval_s: 3.0
+
+# Logging
+log_level: "INFO"
+# Optional zusätzlich in Datei loggen (leer = nur journald/stdout)
+log_file: "/var/log/lastmanagement/app.log"
+
+# Zeitzone für Zeitstempel
+timezone: "Europe/Berlin"
