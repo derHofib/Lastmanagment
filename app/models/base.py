@@ -75,3 +75,12 @@ class SafeState(str, enum.Enum):
     MIN_CURRENT = "min_current"
     # Station sperren (0 A / enable=0)
     BLOCK = "block"
+
+
+class LicenseTier(str, enum.Enum):
+    """Lizenzstufe. Free hat vollen Funktionsumfang, nur die Anzahl der
+    Ladestationen ist begrenzt (siehe app.licensing.TIER_LIMITS)."""
+
+    FREE = "free"
+    PRO = "pro"
+    ENTERPRISE = "enterprise"

@@ -67,6 +67,16 @@ class GlobalConfig(Base):
         Float, default=6.0, nullable=False
     )
 
+    # --- Cloud-Anbindung (Voltibus Cloud, optionales "Phone-Home") ---
+    # Sendet periodisch den Status (wie GET /api/status) an einen selbst
+    # gehosteten Cloud-Dienst (siehe cloud/), rein für die Fernansicht.
+    # Ausfälle der Cloud-Verbindung beeinflussen die lokale Regelung nie
+    # (siehe app.loadmanager.cloud_relay).
+    cloud_relay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cloud_relay_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cloud_relay_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cloud_relay_interval_s: Mapped[float] = mapped_column(Float, default=30.0, nullable=False)
+
     @staticmethod
     def get_or_create(session: Session) -> "GlobalConfig":
         """Liefert die Singleton-Konfiguration, erzeugt sie bei Bedarf."""

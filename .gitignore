@@ -13,6 +13,10 @@ venv/
 config.yaml
 /data/
 
+# Lizenz-Signaturschlüssel (NIEMALS committen, siehe tools/licensing/keygen.py)
+*.pem
+license_private_key*
+
 # Logs
 *.log
 

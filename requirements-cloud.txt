@@ -1,0 +1,14 @@
+# Laufzeitabhängigkeiten für Voltibus Cloud (separater Dienst, siehe README-cloud.md).
+# Getrennt von requirements.txt (dem Lastmanagement selbst) – dieser Dienst
+# läuft auf einem anderen Host als der Raspberry Pi.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+SQLAlchemy>=2.0
+pydantic[email]>=2.6
+bcrypt>=4.0
+PyJWT>=2.7
+
+# Nur für Tests / Entwicklung
+httpx>=0.27
+pytest>=8.0
+pytest-asyncio>=0.23

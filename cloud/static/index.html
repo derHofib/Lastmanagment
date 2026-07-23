@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voltibus Cloud</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="app-header" style="display:none">
+    <h1>⚡ Voltibus Cloud</h1>
+    <div class="user-info">
+      <span id="user-email"></span>
+      <button class="btn secondary small" onclick="logout()">Abmelden</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Anmeldung / Registrierung -->
+    <section id="auth" class="view">
+      <div class="auth-wrap">
+        <h1 class="brand">⚡ Voltibus Cloud</h1>
+        <p class="tagline">Eigene Voltibus-Installationen aus der Ferne einsehen.</p>
+        <div class="auth-tabs">
+          <button data-tab="login" class="active" onclick="showAuthTab('login')">Anmelden</button>
+          <button data-tab="register" onclick="showAuthTab('register')">Registrieren</button>
+        </div>
+        <div class="card" id="auth-login">
+          <div class="field"><label>E-Mail</label><input id="login-email" type="email" autocomplete="username" /></div>
+          <div class="field"><label>Passwort</label><input id="login-password" type="password" autocomplete="current-password" /></div>
+          <button class="btn full" onclick="login()">Anmelden</button>
+        </div>
+        <div class="card" id="auth-register" style="display:none">
+          <div class="field"><label>E-Mail</label><input id="register-email" type="email" autocomplete="username" /></div>
+          <div class="field"><label>Passwort (mind. 8 Zeichen)</label><input id="register-password" type="password" autocomplete="new-password" /></div>
+          <button class="btn full" onclick="register()">Konto erstellen</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="dashboard" class="view">
+      <div class="toolbar">
+        <h2 style="margin:0">Installationen</h2>
+        <button class="btn" onclick="openCreateInstallation()">+ Installation</button>
+      </div>
+      <div id="installations-list"></div>
+      <p class="small-note">
+        Jede Installation entspricht einem Voltibus-System (z. B. einem Raspberry Pi).
+        Nach dem Anlegen erhältst du ein Token – trage es dort unter
+        „Einstellungen → Cloud-Anbindung" ein, damit es seinen Status hierher sendet.
+      </p>
+    </section>
+  </main>
+
+  <dialog id="installation-dialog"></dialog>
+  <div id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

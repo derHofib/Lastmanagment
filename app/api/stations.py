@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_session
-from app.models import ChargingStation, DeviceProfile
+from app.licensing import effective_max_stations
+from app.models import ChargingStation, DeviceProfile, License
 from app.modbus.client import ModbusError, StationClient
 from app.modbus.runtime import StationSpec
 from app.schemas import (
@@ -31,6 +32,23 @@ def _require_profile(session: Session, profile_id: int) -> DeviceProfile:
     return profile
 
 
+def _require_station_quota(session: Session) -> None:
+    """Setzt das Lizenzlimit für die Anzahl Ladestationen durch (siehe
+    app.licensing) – bewusst vor dem eigentlichen Anlegen geprüft, damit
+    kein Datensatz erst erzeugt und danach wieder verworfen werden muss."""
+    lic = License.get_or_create(session)
+    limit = effective_max_stations(lic.tier, lic.max_stations)
+    if limit is None:
+        return
+    used = session.query(ChargingStation).count()
+    if used >= limit:
+        raise HTTPException(
+            402,
+            f"Lizenzgrenze erreicht: Die {lic.tier.value}-Lizenz erlaubt maximal "
+            f"{limit} Ladestation(en). Bitte Lizenz im Reiter 'Lizenz' upgraden.",
+        )
+
+
 @router.get("", response_model=list[ChargingStationRead])
 def list_stations(session: Session = Depends(get_session)):
     return session.query(ChargingStation).order_by(ChargingStation.name).all()
@@ -47,6 +65,7 @@ def get_station(station_id: int, session: Session = Depends(get_session)):
 @router.post("", response_model=ChargingStationRead, status_code=201)
 def create_station(data: ChargingStationCreate, session: Session = Depends(get_session)):
     _require_profile(session, data.profile_id)
+    _require_station_quota(session)
     station = ChargingStation(**data.model_dump())
     session.add(station)
     session.commit()

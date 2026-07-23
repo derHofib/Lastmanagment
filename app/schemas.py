@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from datetime import time as dt_time
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,6 +11,7 @@ from app.models.base import (
     ByteOrder,
     DataType,
     DistributionStrategy,
+    LicenseTier,
     ManagementMode,
     PhaseConfig,
     RegisterRole,
@@ -268,6 +270,10 @@ class GlobalConfigBase(BaseModel):
     en14a_enabled: bool = False
     en14a_active: bool = False
     en14a_limit_current_a: float = Field(6.0, ge=0)
+    cloud_relay_enabled: bool = False
+    cloud_relay_url: str | None = Field(None, max_length=255)
+    cloud_relay_token: str | None = Field(None, max_length=255)
+    cloud_relay_interval_s: float = Field(30.0, gt=0)
 
 
 class GlobalConfigRead(GlobalConfigBase):
@@ -292,6 +298,25 @@ class GlobalConfigUpdate(BaseModel):
     en14a_enabled: bool | None = None
     en14a_active: bool | None = None
     en14a_limit_current_a: float | None = Field(None, ge=0)
+    cloud_relay_enabled: bool | None = None
+    cloud_relay_url: str | None = Field(None, max_length=255)
+    cloud_relay_token: str | None = Field(None, max_length=255)
+    cloud_relay_interval_s: float | None = Field(None, gt=0)
+
+
+# --- Lizenz ------------------------------------------------------------
+
+class LicenseRead(BaseModel):
+    tier: LicenseTier
+    # Effektive Obergrenze für Ladestationen; None = unbegrenzt
+    max_stations: int | None
+    used_stations: int
+    issued_to: str | None = None
+    activated_at: datetime | None = None
+
+
+class LicenseActivate(BaseModel):
+    key: str = Field(..., min_length=1, max_length=1024)
 
 
 # --- Live-/Status-Antworten ------------------------------------------------

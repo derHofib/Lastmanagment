@@ -69,6 +69,12 @@ _NEW_COLUMNS = {
     "distribution_boards": [
         ("strategy", "VARCHAR"),
     ],
+    "global_config": [
+        ("cloud_relay_enabled", "BOOLEAN DEFAULT 0"),
+        ("cloud_relay_url", "VARCHAR"),
+        ("cloud_relay_token", "VARCHAR"),
+        ("cloud_relay_interval_s", "FLOAT DEFAULT 30.0"),
+    ],
 }
 
 

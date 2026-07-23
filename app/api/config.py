@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.loadmanager.cloud_relay import service as cloud_relay_service
 from app.models import DeviceProfile, GlobalConfig
 from app.schemas import GlobalConfigRead, GlobalConfigUpdate
 
@@ -29,3 +30,11 @@ def update_config(data: GlobalConfigUpdate, session: Session = Depends(get_sessi
     session.commit()
     session.refresh(cfg)
     return cfg
+
+
+@router.post("/cloud-relay/test")
+async def test_cloud_relay():
+    """Sendet einmalig den aktuellen Status an die konfigurierte Cloud-URL
+    (unabhängig davon, ob die Anbindung bereits aktiviert ist) – für den
+    „Verbindung jetzt testen"-Button in den Einstellungen."""
+    return await cloud_relay_service.test_now()

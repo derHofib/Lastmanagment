@@ -5,6 +5,7 @@ const nf = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
 const nf2 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
 const PHASES = ["L1", "L2", "L3"];
 const STRATEGY_TXT = { equal: "Gleichmäßig", priority: "Priorität", fifo: "FIFO" };
+const TIER_TXT = { free: "Free", pro: "Pro", enterprise: "Enterprise" };
 
 // --- Hilfsfunktionen -------------------------------------------------------
 async function api(path, opts) {
@@ -46,6 +47,7 @@ function showView(name) {
   if (name === "boards") loadBoards();
   if (name === "profiles") loadProfiles();
   if (name === "settings") loadSettings();
+  if (name === "license") loadLicense();
 }
 
 let profileCache = [];
@@ -674,6 +676,24 @@ async function loadSettings() {
         <option value="false" ${!c.en14a_active ? "selected" : ""}>nein</option></select></div>
       <div class="field"><label>Reduzierte Grenze (A/Phase)</label><input id="c-14a-lim" type="number" step="0.1" value="${c.en14a_limit_current_a}"></div>
     </div>
+    <h2 style="margin-top:16px">Cloud-Anbindung (optional)</h2>
+    <p class="small-note" style="margin-bottom:10px">
+      Sendet periodisch den Status an eine selbst gehostete Voltibus-Cloud-Instanz
+      zur Fernansicht. Ausfälle der Verbindung haben keinerlei Einfluss auf die
+      lokale Regelung.
+    </p>
+    <div class="row">
+      <div class="field"><label>Aktiviert</label>
+        <select id="c-cloud-en"><option value="true" ${c.cloud_relay_enabled ? "selected" : ""}>ja</option>
+        <option value="false" ${!c.cloud_relay_enabled ? "selected" : ""}>nein</option></select></div>
+      <div class="field" style="flex:2 1 260px"><label>Cloud-URL</label><input id="c-cloud-url" placeholder="https://cloud.example.org" value="${esc(c.cloud_relay_url || "")}"></div>
+      <div class="field" style="flex:2 1 260px"><label>Installations-Token</label><input id="c-cloud-token" placeholder="vltb_..." value="${esc(c.cloud_relay_token || "")}"></div>
+      <div class="field"><label>Intervall (s)</label><input id="c-cloud-interval" type="number" step="1" value="${c.cloud_relay_interval_s}"></div>
+    </div>
+    <div class="row">
+      <button class="btn secondary" type="button" onclick="testCloudRelay()">Verbindung jetzt testen</button>
+      <span id="cloud-test-result" class="muted"></span>
+    </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px">
       <button class="btn" onclick="saveSettings()">Speichern</button>
     </div>`;
@@ -691,9 +711,75 @@ async function saveSettings() {
     meter_tcp_port: +val("c-meter-port"), meter_unit_id: +val("c-meter-unit"),
     en14a_enabled: val("c-14a-en") === "true", en14a_active: val("c-14a-act") === "true",
     en14a_limit_current_a: +val("c-14a-lim"),
+    cloud_relay_enabled: val("c-cloud-en") === "true",
+    cloud_relay_url: val("c-cloud-url") || null,
+    cloud_relay_token: val("c-cloud-token") || null,
+    cloud_relay_interval_s: +val("c-cloud-interval"),
   };
   try { await api("/api/config", { method: "PUT", body: JSON.stringify(body) }); toast("Einstellungen gespeichert."); }
   catch (e) { toast(e.message, true); }
+}
+
+async function testCloudRelay() {
+  const el = document.getElementById("cloud-test-result");
+  el.textContent = "Sende Test …";
+  try {
+    // Aktuelle Felder zuerst speichern, damit der Test die eingegebenen
+    // (nicht die zuletzt gespeicherten) Zugangsdaten verwendet.
+    await saveSettings();
+    const r = await api("/api/config/cloud-relay/test", { method: "POST" });
+    el.textContent = r.ok ? "✓ Verbindung erfolgreich." : "✗ " + r.error;
+    el.style.color = r.ok ? "var(--ok)" : "var(--err)";
+  } catch (e) {
+    el.textContent = "✗ " + e.message;
+    el.style.color = "var(--err)";
+  }
+}
+
+// --- Lizenz ------------------------------------------------------------
+
+async function loadLicense() {
+  const lic = await api("/api/license");
+  const unlimited = lic.max_stations === null;
+  const pct = unlimited ? 0 : Math.min(100, (lic.used_stations / Math.max(1, lic.max_stations)) * 100);
+  const warn = !unlimited && lic.used_stations >= lic.max_stations;
+  document.getElementById("license-card").innerHTML = `
+    <div class="row" style="align-items:center">
+      <span class="badge ${lic.tier === "free" ? "idle" : "ok"}" style="font-size:14px">${TIER_TXT[lic.tier] || lic.tier}</span>
+      ${lic.issued_to ? `<span class="muted">Lizenznehmer: ${esc(lic.issued_to)}</span>` : ""}
+      ${lic.activated_at ? `<span class="muted">Aktiviert am ${new Date(lic.activated_at).toLocaleDateString("de-DE")}</span>` : ""}
+    </div>
+    <div style="margin-top:14px">
+      <div class="row" style="justify-content:space-between;margin-bottom:4px">
+        <span>Ladestationen</span>
+        <span>${lic.used_stations} / ${unlimited ? "unbegrenzt" : lic.max_stations}</span>
+      </div>
+      ${unlimited ? "" : `<div class="bar-track"><div class="bar-fill ${warn ? "warn" : ""}" style="width:${pct}%"></div></div>`}
+    </div>
+    <p class="small-note" style="margin-top:16px">
+      Jede Lizenzstufe hat den vollen Funktionsumfang – nur die Anzahl der
+      Ladestationen ist begrenzt: Free bis zu 2, Pro bis zu 10, Enterprise
+      unbegrenzt. Ein Schlüssel gilt sofort nach Aktivierung.
+    </p>
+    <div class="row" style="margin-top:16px">
+      <div class="field" style="flex:3 1 320px">
+        <label>Lizenzschlüssel</label>
+        <input id="lic-key" placeholder="VLTB1....." />
+      </div>
+      <div class="field" style="flex:0 0 auto;align-self:flex-end">
+        <button class="btn" onclick="activateLicense()">Aktivieren</button>
+      </div>
+    </div>`;
+}
+
+async function activateLicense() {
+  const key = val("lic-key").trim();
+  if (!key) return;
+  try {
+    await api("/api/license/activate", { method: "POST", body: JSON.stringify({ key }) });
+    toast("Lizenz aktiviert.");
+    loadLicense();
+  } catch (e) { toast(e.message, true); }
 }
 
 // --- Utils -----------------------------------------------------------------

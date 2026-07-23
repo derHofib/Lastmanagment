@@ -1,5 +1,11 @@
 """Integrationstests der REST-API (Profile, Stationen, Config, Status)."""
 
+import base64
+import json
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 EXAMPLE_PROFILE = {
     "name": "Beispiel-Wallbox 22kW",
     "manufacturer": "Muster GmbH",
@@ -298,3 +304,83 @@ def test_board_strategy_field_roundtrip(client):
     assert uv_node["strategy"] is None
 
     client.delete(f"/api/boards/{uv_id}")
+
+
+# --- Lizenzsystem -----------------------------------------------------------
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _make_test_license_key(monkeypatch, tier="pro", max_stations=None, issued_to=None):
+    """Erzeugt einen gültigen, signierten Testschlüssel und patcht den vom
+    Server geprüften öffentlichen Schlüssel darauf um – ohne den echten
+    Produktions-Privatschlüssel zu benötigen."""
+    import app.licensing as licensing
+
+    private_key = Ed25519PrivateKey.generate()
+    public_b64 = _b64url(private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
+    monkeypatch.setattr(licensing, "PUBLIC_KEY_B64", public_b64)
+
+    payload = {"tier": tier, "max_stations": max_stations, "issued_to": issued_to, "iat": "2026-01-01"}
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = private_key.sign(payload_bytes)
+    return f"VLTB1.{_b64url(payload_bytes)}.{_b64url(signature)}"
+
+
+def test_license_default_is_free_with_two_station_limit(client):
+    r = client.get("/api/license")
+    assert r.status_code == 200
+    assert r.json() == {
+        "tier": "free", "max_stations": 2, "used_stations": 0,
+        "issued_to": None, "activated_at": None,
+    }
+
+
+def test_station_creation_blocked_by_free_license_limit(client):
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+
+    def station(name, ip):
+        return {"name": name, "ip_address": ip, "profile_id": pid}
+
+    assert client.post("/api/stations", json=station("S1", "10.0.0.1")).status_code == 201
+    assert client.post("/api/stations", json=station("S2", "10.0.0.2")).status_code == 201
+
+    r = client.post("/api/stations", json=station("S3", "10.0.0.3"))
+    assert r.status_code == 402
+    assert "Lizenzgrenze" in r.json()["detail"]
+
+    # Nutzung wird korrekt im Lizenzstatus widergespiegelt
+    assert client.get("/api/license").json()["used_stations"] == 2
+
+
+def test_license_activation_raises_station_limit(client, monkeypatch):
+    key = _make_test_license_key(monkeypatch, tier="pro", issued_to="Test GmbH")
+    r = client.post("/api/license/activate", json={"key": key})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tier"] == "pro"
+    assert body["max_stations"] == 10
+    assert body["issued_to"] == "Test GmbH"
+
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+
+    def station(name, ip):
+        return {"name": name, "ip_address": ip, "profile_id": pid}
+
+    for i in range(3):
+        r = client.post("/api/stations", json=station(f"S{i}", f"10.0.1.{i}"))
+        assert r.status_code == 201, r.text
+
+
+def test_license_activation_with_explicit_max_stations_override(client, monkeypatch):
+    key = _make_test_license_key(monkeypatch, tier="enterprise", max_stations=3)
+    r = client.post("/api/license/activate", json={"key": key})
+    assert r.status_code == 200, r.text
+    assert r.json()["max_stations"] == 3
+
+
+def test_license_activation_rejects_invalid_key(client):
+    r = client.post("/api/license/activate", json={"key": "not-a-real-key"})
+    assert r.status_code == 400
+    assert "Ungültiger Lizenzschlüssel" in r.json()["detail"]

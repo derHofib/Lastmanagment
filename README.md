@@ -43,6 +43,14 @@ die Weboberfläche/Datenbank anlegen – ohne den Code zu ändern.
   Stationen und Profilen, Import/Export von Profilen als JSON, Einstellungen.
 - **Betrieb:** systemd-Service, Logging nach journald + optional Datei,
   Zeitstempel in Europe/Berlin, ressourcenschonend (asyncio, SQLite).
+- **Lizenzsystem:** Free/Pro/Enterprise mit jeweils **vollem
+  Funktionsumfang** – einziger Unterschied ist die Anzahl der
+  Ladestationen (Free: 2). Signierte Schlüssel (Ed25519), lokal und offline
+  geprüft, keine Aktivierung über das Internet nötig.
+- **Voltibus Cloud (optional):** separater, selbst gehosteter Dienst zur
+  Fernansicht der eigenen Installation(en) – Registrierung, Login,
+  Status-Dashboard. Ausfälle der Cloud-Verbindung beeinflussen die lokale
+  Regelung nie (siehe `README-cloud.md`).
 
 ---
 
@@ -72,7 +80,8 @@ Einrichtung (einmalig):
 app/
   config.py           Infrastruktur-Einstellungen (.env / config.yaml)
   db.py               SQLAlchemy-Engine + Session (SQLite, WAL)
-  models/             ORM-Datenmodell (Profile, Register, Stationen, Config, Messwerte)
+  licensing.py         Signierte Lizenzschlüssel (Ed25519) prüfen, Tier-Limits
+  models/             ORM-Datenmodell (Profile, Register, Stationen, Config, Lizenz, Messwerte)
   schemas.py          Pydantic-Schemas (API-Validierung)
   modbus/
     codec.py          Generische Kodierung/Dekodierung (Herzstück, voll getestet)
@@ -82,12 +91,19 @@ app/
     engine.py         Reine Verteil-Logik (phasengenau, Strategien)
     smoothing.py      Hysterese / Mindesthaltezeiten
     safety.py         Fail-Safe & konservative Kapazitätsreservierung
+    schedule.py       Zeitsteuerung (wiederkehrende Sperrfenster)
+    status_builder.py Baut den Systemzustand (für API + Cloud-Relay gemeinsam)
+    cloud_relay.py     Optionales "Phone-Home" an Voltibus Cloud
     loop.py           Regelzyklus (Polling → Verteilung → Sollwerte schreiben)
-  api/                REST-Endpunkte (Profile, Stationen, Config, Status)
+  api/                REST-Endpunkte (Profile, Stationen, Ladepunkte, Verteiler, Config, Lizenz, Status)
   web/static/         Schlankes Web-UI (HTML/JS + Fetch)
-  main.py             FastAPI-App + Lifespan (startet Regelzyklus)
-tools/simulator.py    Modbus-TCP-Wallbox-Simulator zum Verifizieren von Profilen
-tests/                Unit- und Integrationstests
+  main.py             FastAPI-App + Lifespan (startet Regelzyklus + Cloud-Relay)
+cloud/                Voltibus Cloud – separater, mandantenfähiger Dienst
+                      (Registrierung/Login/Fernansicht), siehe README-cloud.md
+tools/
+  simulator.py         Modbus-TCP-Wallbox-Simulator zum Verifizieren von Profilen
+  licensing/keygen.py  Vendor-Tool: signierte Lizenzschlüssel ausstellen (nicht Teil der App)
+tests/                Unit- und Integrationstests (Hauptanwendung)
 ```
 
 Datenfluss im Regelzyklus (`app/loadmanager/loop.py`):
@@ -223,6 +239,56 @@ konsequent 0 A – kein stillschweigender Rückfall auf Netzladen.
 
 ---
 
+## Lizenzsystem
+
+Drei Stufen (`app.models.base.LicenseTier`): **Free**, **Pro**, **Enterprise**.
+Jede Stufe hat **denselben vollen Funktionsumfang** – der einzige
+Unterschied ist die Obergrenze der Anzahl **Ladestationen** (nicht
+Ladepunkte): Free = 2, Pro = 10, Enterprise = unbegrenzt
+(`app/licensing.py::TIER_LIMITS`). Ohne aktivierten Schlüssel gilt Free.
+
+Lizenzschlüssel sind mit **Ed25519** signiert und werden vollständig
+**offline und lokal** geprüft (`app/licensing.py::verify_license_key`) – es
+ist keine Internetverbindung oder Aktivierung über einen zentralen Server
+nötig. Der private Signaturschlüssel liegt ausschließlich beim Herausgeber
+(nicht im Repository); neue Schlüssel werden mit `tools/licensing/keygen.py`
+ausgestellt:
+
+```bash
+# Einmalig: Schlüsselpaar erzeugen, öffentlichen Teil in
+# app/licensing.py::PUBLIC_KEY_B64 eintragen
+python -m tools.licensing.keygen generate-keypair --out private_key.pem
+
+# Für jeden Kunden: einen Pro-Schlüssel ausstellen
+python -m tools.licensing.keygen issue --tier pro --customer "Kundenname" \
+    --private-key private_key.pem
+```
+
+Aktivierung über den Reiter **„Lizenz"** im Web-UI (Schlüssel einfügen,
+„Aktivieren") oder direkt per `POST /api/license/activate`. Wird beim
+Anlegen einer weiteren Ladestation das Limit erreicht, antwortet die API
+mit `402 Payment Required` und einer sprechenden Fehlermeldung.
+
+---
+
+## Cloud-Anbindung (Voltibus Cloud, optional)
+
+Ein **separater, selbst gehosteter Dienst** (`cloud/`, siehe
+[`README-cloud.md`](README-cloud.md)) für die Fernansicht: Konto anlegen,
+eine oder mehrere Installationen koppeln, Status von unterwegs einsehen.
+Läuft bewusst getrennt vom Lastmanagement selbst (eigene Datenbank, eigene
+Authentifizierung) – Voltibus bleibt single-tenant und lokal.
+
+Die lokale Installation sendet dazu periodisch ihren Status (dieselben
+Daten wie `GET /api/status`) an den Cloud-Dienst
+(`app/loadmanager/cloud_relay.py`), einstellbar unter *Einstellungen →
+Cloud-Anbindung* (Cloud-URL, Installations-Token, Intervall). Jeder Fehler
+(Cloud nicht erreichbar, falsches Token) wird geloggt und ignoriert – **die
+lokale Regelung ist davon nie betroffen**, die Anbindung läuft als eigener,
+unabhängiger Hintergrund-Task.
+
+---
+
 ## Geräteprofil (Import/Export-Format)
 
 Ein Profil ist als JSON import-/exportierbar (siehe
@@ -311,6 +377,10 @@ journalctl -u lastmanagement -f
    und §14a.
 6. **Dashboard** zeigt Live-Last pro Phase gegen die Grenze und alle Ladepunkte
    mit Ist-/Soll-Strom und Status.
+7. **Lizenz** (optional) unter *Lizenz* aktivieren, falls mehr als 2
+   Ladestationen benötigt werden. **Cloud-Anbindung** (optional) unter
+   *Einstellungen*, falls eine selbst gehostete Voltibus-Cloud-Instanz zur
+   Fernansicht existiert (siehe `README-cloud.md`).
 
 ---
 
@@ -381,9 +451,19 @@ Abgedeckt:
 - **API** (`tests/test_api.py`): CRUD für Profile/Stationen/Ladepunkte
   (inkl. Zeitpläne, Doppel-Ladepunkt-Szenario, PV-Flag)/Config/Verteiler
   (inkl. Strategie-Feld), Validierung (u. a. Zyklenschutz im
-  Verteilungsbaum), Import/Export, Status.
+  Verteilungsbaum), Import/Export, Status, Lizenz-Aktivierung und
+  Stationslimit (402).
 - **Modbus-Integration** (`tests/test_integration_modbus.py`): End-to-end gegen
   einen echten `pymodbus`-TCP-Server inkl. Schreiben & Clamping.
+- **Lizenz** (`tests/test_licensing.py`): Ed25519-Signaturprüfung (eigenes
+  Testschlüsselpaar), manipulierte Payload/Signatur, Tier-Limits.
+- **Cloud-Relay** (`tests/test_cloud_relay.py`): sendet Status nur bei
+  aktivierter Anbindung, schluckt Verbindungsfehler/HTTP-Fehlerstatus ohne
+  zu werfen.
+- **Voltibus Cloud** (`cloud/tests/`, separat mit `pytest cloud/tests`
+  auszuführen): Registrierung/Login/Logout, Installationen (Anlegen,
+  Token-Rotation, Löschen, Mandantentrennung zwischen Nutzern), Ingest mit
+  gültigem/ungültigem Token.
 
 ---
 
@@ -417,7 +497,11 @@ Datenbank gehalten.
 | GET/POST | `/api/boards` | Verteiler auflisten/anlegen |
 | PUT/DELETE | `/api/boards/{id}` | Verteiler ändern/löschen |
 | GET | `/api/boards/tree` | kompletter Verteilungsbaum inkl. Live-Auslastung |
-| GET/PUT | `/api/config` | globale Grenzwerte & Modus |
+| GET/PUT | `/api/config` | globale Grenzwerte & Modus (inkl. Cloud-Anbindung) |
+| POST | `/api/config/cloud-relay/test` | Cloud-Verbindung sofort testen |
 | GET | `/api/status` | Systemzustand (Last/Reserve/Ladepunkte) |
+| GET | `/api/license` | aktuelle Lizenzstufe & Stationsnutzung |
+| POST | `/api/license/activate` | Lizenzschlüssel aktivieren |
 
-Vollständige, interaktive Dokumentation unter `/docs` (Swagger UI).
+Vollständige, interaktive Dokumentation unter `/docs` (Swagger UI). Die REST-API
+von Voltibus Cloud (separater Dienst) ist in `README-cloud.md` beschrieben.

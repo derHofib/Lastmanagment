@@ -17,8 +17,10 @@
 (function () {
   if (!window.LM_DEMO) return;
 
-  const LS_KEY = "lm_demo_state_v4";
+  const LS_KEY = "lm_demo_state_v5";
   const PHASES = ["L1", "L2", "L3"];
+  // Spiegelt app.licensing.TIER_LIMITS (None = unbegrenzt -> null)
+  const TIER_LIMITS = { free: 2, pro: 10, enterprise: null };
 
   // --- Seed-Daten (entspricht examples/beispiel_wallbox.json) --------------
   function seedState() {
@@ -50,6 +52,8 @@
         dynamic_meter_enabled: false, meter_profile_id: null, meter_ip_address: null,
         meter_tcp_port: 502, meter_unit_id: 1,
         en14a_enabled: false, en14a_active: false, en14a_limit_current_a: 6,
+        cloud_relay_enabled: false, cloud_relay_url: null, cloud_relay_token: null,
+        cloud_relay_interval_s: 30,
       },
       profiles: [{
         id: 1, name: "Beispiel-Wallbox 22kW", manufacturer: "Muster GmbH",
@@ -63,6 +67,7 @@
         { id: 1, station_id: 1, connector_suffix: "", name: "Ladepunkt links", phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, distribution_board_id: 2, circuit_breaker_a: 16, enabled: true, safe_state: "block", pv_surplus_only: false, schedules: [] },
         { id: 2, station_id: 1, connector_suffix: "_2", name: "Ladepunkt rechts", phase_config: "3p", priority: 1, max_current_a: 32, min_current_a: 6, distribution_board_id: 2, circuit_breaker_a: 16, enabled: true, safe_state: "min_current", pv_surplus_only: false, schedules: [] },
       ],
+      license: { tier: "free", raw_key: null, max_stations: null, issued_to: null, activated_at: null },
     };
   }
 
@@ -302,6 +307,13 @@
         return json(state.config);
       }
     }
+    if (path === "/api/config/cloud-relay/test" && method === "POST") {
+      // Demo-Modus: kein echtes Backend, daher nur eine plausible Antwort
+      // ohne tatsächlichen Netzwerkzugriff.
+      if (!state.config.cloud_relay_url || !state.config.cloud_relay_token)
+        return json({ ok: false, error: "Cloud-URL oder Token fehlt" });
+      return json({ ok: false, error: "Demo-Modus: keine echte Cloud-Verbindung möglich" });
+    }
 
     // /api/boards ...
     let m;
@@ -431,7 +443,54 @@
       return snap ? json(snap) : err(404, "Ladepunkt nicht gefunden");
     }
 
+    // /api/license -------------------------------------------------------
+    if (path === "/api/license" && method === "GET") return json(licenseRead());
+    if (path === "/api/license/activate" && method === "POST") return activateLicense(body);
+
     return err(404, "Demo: unbekannter Endpunkt " + path);
+  }
+
+  // Lizenz: effektives Stationslimit (explizite Override vor Tier-Standard,
+  // spiegelt app.licensing.effective_max_stations).
+  function effectiveMaxStations() {
+    if (state.license.max_stations != null) return state.license.max_stations;
+    return TIER_LIMITS[state.license.tier];
+  }
+  function licenseRead() {
+    return {
+      tier: state.license.tier,
+      max_stations: effectiveMaxStations(),
+      used_stations: state.stations.length,
+      issued_to: state.license.issued_to,
+      activated_at: state.license.activated_at,
+    };
+  }
+  // Demo-Vereinfachung: dekodiert nur den Payload, prüft KEINE Ed25519-
+  // Signatur (die Demo läuft komplett im Browser ohne echte Sicherheitsgrenze
+  // – die echte Prüfung sitzt in app/licensing.py::verify_license_key).
+  function decodeLicenseKey(key) {
+    const parts = String(key || "").trim().split(".");
+    if (parts.length !== 3 || parts[0] !== "VLTB1") return null;
+    try {
+      let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      return JSON.parse(decodeURIComponent(escape(atob(b64))));
+    } catch (_) {
+      return null;
+    }
+  }
+  function activateLicense(body) {
+    const payload = decodeLicenseKey(body && body.key);
+    if (!payload || !Object.prototype.hasOwnProperty.call(TIER_LIMITS, payload.tier))
+      return err(400, "Ungültiger Lizenzschlüssel: unbekanntes Schlüsselformat");
+    state.license = {
+      tier: payload.tier, raw_key: body.key,
+      max_stations: payload.max_stations ?? null,
+      issued_to: payload.issued_to ?? null,
+      activated_at: new Date().toISOString(),
+    };
+    save(state);
+    return json(licenseRead());
   }
 
   function createProfile(body) {
@@ -460,6 +519,11 @@
   function createStation(body) {
     if (!state.profiles.some((p) => p.id === body.profile_id))
       return err(400, "Geräteprofil existiert nicht");
+    const limit = effectiveMaxStations();
+    if (limit != null && state.stations.length >= limit) {
+      return err(402, "Lizenzgrenze erreicht: Die " + state.license.tier +
+        "-Lizenz erlaubt maximal " + limit + " Ladestation(en). Bitte Lizenz im Reiter 'Lizenz' upgraden.");
+    }
     const s = { id: state.seqStation++, ...body };
     state.stations.push(s);
     save(state);

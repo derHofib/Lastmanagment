@@ -15,11 +15,13 @@ from app.api import (
     boards_router,
     charge_points_router,
     config_router,
+    license_router,
     profiles_router,
     stations_router,
     status_router,
 )
 from app.db import init_db
+from app.loadmanager.cloud_relay import service as cloud_relay_service
 from app.loadmanager.loop import service
 from app.logging_config import setup_logging
 
@@ -30,14 +32,16 @@ STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialisiert DB und startet/stoppt den Regelzyklus mit der App."""
+    """Initialisiert DB und startet/stoppt Regelzyklus + Cloud-Anbindung."""
     setup_logging()
     init_db()
     log.info("Lastmanagement %s startet", __version__)
     service.start()
+    cloud_relay_service.start()
     try:
         yield
     finally:
+        await cloud_relay_service.stop()
         await service.stop()
         log.info("Lastmanagement beendet")
 
@@ -55,6 +59,7 @@ app.include_router(charge_points_router)
 app.include_router(boards_router)
 app.include_router(config_router)
 app.include_router(status_router)
+app.include_router(license_router)
 
 
 @app.get("/healthz", tags=["System"])

@@ -23,6 +23,15 @@ def client(monkeypatch):
 
     monkeypatch.setattr(service, "start", lambda: None)
 
+    # Cloud-Relay-Task ebenfalls nicht starten: er ist ein modulweites
+    # Singleton, dessen asyncio.Event/Task sonst an den Event-Loop des
+    # jeweils ERSTEN Tests gebunden bliebe und in späteren Tests (neuer
+    # Event-Loop pro TestClient) mit "bound to a different event loop"
+    # fehlschlägt.
+    from app.loadmanager.cloud_relay import service as cloud_relay_service
+
+    monkeypatch.setattr(cloud_relay_service, "start", lambda: None)
+
     from app.db import Base, engine, init_db
 
     # Frische Tabellen
