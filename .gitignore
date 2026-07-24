@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Datenbank & Laufzeitdateien
+*.db
+*.db-wal
+*.db-shm
+config.yaml
+/data/
+
+# Lizenz-Signaturschlüssel (NIEMALS committen, siehe tools/licensing/keygen.py)
+*.pem
+license_private_key*
+
+# Logs
+*.log
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,60 @@
+name: Web-UI auf GitHub Pages veröffentlichen
+
+# Veröffentlicht die statische Weboberfläche (app/web/static) als interaktive
+# Demo auf GitHub Pages. Achtung: GitHub Pages kann kein Python-Backend
+# ausführen – die Demo läuft daher mit simulierten API-Daten im Browser
+# (siehe app/web/static/demo.js). Für den echten Betrieb läuft die App auf
+# dem Raspberry Pi.
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Nur ein gleichzeitiger Deploy
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Seite zusammenstellen
+        run: |
+          mkdir -p _site
+          cp -r app/web/static/* _site/
+          # Demo-Modus in der veröffentlichten Version aktivieren
+          printf 'window.LM_DEMO = true;\n' > _site/config.js
+          # Jekyll-Verarbeitung deaktivieren
+          touch _site/.nojekyll
+
+      # Der Actions-Token darf eine Pages-Site nicht per API neu anlegen
+      # (erfordert Admin-Rechte, unabhängig von Public/Private) – daher kein
+      # enablement:true. Pages muss einmalig manuell aktiviert werden:
+      # Settings → Pages → Source = "GitHub Actions". Ist das erledigt,
+      # findet dieser Schritt die Site und der Deploy läuft durch.
+      - name: Pages konfigurieren
+        uses: actions/configure-pages@v5
+
+      - name: Artefakt hochladen
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Auf GitHub Pages veröffentlichen
+        id: deployment
+        uses: actions/deploy-pages@v4

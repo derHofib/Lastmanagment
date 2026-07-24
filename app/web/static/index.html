@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lastmanagement Ladestationen</title>
+  <!-- Relative Pfade: funktionieren sowohl unter FastAPI ("/") als auch unter
+       GitHub Pages (Unterpfad /<repo>/). -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>⚡ Lastmanagement</h1>
+    <nav>
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="stations">Ladestationen</button>
+      <button data-view="boards">Verteilung</button>
+      <button data-view="topology">Topologie</button>
+      <button data-view="profiles">Geräteprofile</button>
+      <button data-view="settings">Einstellungen</button>
+      <button data-view="license">Lizenz</button>
+    </nav>
+    <span id="cycle-info" class="muted" style="margin-left:auto"></span>
+  </header>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="dashboard" class="view active">
+      <div class="toolbar">
+        <h2 style="margin:0">Dashboard</h2>
+        <button class="btn secondary" onclick="openDashboardLayout()">Anpassen</button>
+      </div>
+      <div id="dashboard-widgets" class="dashboard-widgets">
+        <div class="card" data-widget-id="phase-bars">
+          <h2>Gesamtlast pro Phase</h2>
+          <div id="phase-bars"></div>
+        </div>
+        <div class="card" data-widget-id="system-info">
+          <h2>Systemzustand</h2>
+          <div id="system-info"></div>
+        </div>
+        <div class="card" data-widget-id="flow">
+          <h2>Energiefluss</h2>
+          <div id="flow-diagram"></div>
+        </div>
+        <div class="card" data-widget-id="live-table">
+          <h2>Ladepunkte (Live)</h2>
+          <table>
+            <thead>
+              <tr><th>Station</th><th>Status</th><th>Ist-Strom je Phase</th><th>Soll-Strom</th><th>Leistung</th><th>Energie</th></tr>
+            </thead>
+            <tbody id="live-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stationen (physische Verbindung) + ihre Ladepunkte -->
+    <section id="stations" class="view">
+      <div class="toolbar">
+        <h2>Ladestationen &amp; Ladepunkte</h2>
+        <button class="btn" onclick="openStation()">+ Neue Station</button>
+      </div>
+      <div id="stations-list"></div>
+    </section>
+
+    <!-- Verteilung (Hauptverteilung / Unterverteilung / Abgänge) -->
+    <section id="boards" class="view">
+      <div class="toolbar">
+        <h2>Verteilungshierarchie</h2>
+        <button class="btn" onclick="openBoard()">+ Unterverteilung</button>
+      </div>
+      <div class="card">
+        <p class="small-note">
+          Bildet die reale Elektroinstallation ab: Hauptverteilung (Hausanschluss)
+          → Unterverteilungen → Abgänge zu den Ladestationen, jeweils mit eigener
+          Absicherung. Das Lastmanagement hält die Absicherung auf JEDER Ebene ein,
+          nicht nur die Gesamtgrenze am Hausanschluss.
+        </p>
+        <div id="board-tree"></div>
+      </div>
+    </section>
+
+    <!-- Topologie (Baukasten: Verteiler + Ladestationen frei anordnen, Stromfluss) -->
+    <section id="topology" class="view">
+      <div class="toolbar">
+        <h2 style="margin:0">Topologie &amp; Stromfluss</h2>
+        <div class="row" style="margin:0">
+          <button class="btn secondary" onclick="chooseTopoBackground()">Hintergrundbild wählen</button>
+          <button class="btn secondary" onclick="removeTopoBackground()">Hintergrund entfernen</button>
+          <button class="btn secondary" onclick="autoArrangeTopology()">Auto-Anordnen</button>
+        </div>
+      </div>
+      <p class="small-note">
+        Verteiler und Ladestationen frei per Ziehen anordnen. Die Linien zeigen
+        den aktuellen Stromfluss: grün bei 0&nbsp;% Auslastung, rot bei 100&nbsp;%.
+        Ein eigenes Hintergrundbild (z.&nbsp;B. ein Foto des Standorts) hilft bei
+        der Zuordnung.
+      </p>
+      <div class="card topo-canvas-wrap">
+        <div id="topo-canvas" class="topo-canvas topo-grid-bg">
+          <svg id="topo-lines" class="topo-lines"></svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- Profile -->
+    <section id="profiles" class="view">
+      <div class="toolbar">
+        <h2>Geräteprofile (Modbus-Register-Maps)</h2>
+        <div class="row" style="margin:0">
+          <button class="btn secondary" onclick="importProfile()">JSON importieren</button>
+          <button class="btn" onclick="openProfile()">+ Neues Profil</button>
+        </div>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Hersteller</th><th>Unit-ID</th><th>Byte/Word</th><th>Register</th><th></th></tr>
+          </thead>
+          <tbody id="profiles-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Einstellungen -->
+    <section id="settings" class="view">
+      <h2>Globale Einstellungen</h2>
+      <div class="card" id="settings-form"></div>
+    </section>
+
+    <!-- Lizenz -->
+    <section id="license" class="view">
+      <h2>Lizenz</h2>
+      <div class="card" id="license-card"></div>
+    </section>
+  </main>
+
+  <!-- Dialoge -->
+  <dialog id="station-dialog"></dialog>
+  <dialog id="chargepoint-dialog"></dialog>
+  <dialog id="profile-dialog"></dialog>
+  <dialog id="board-dialog"></dialog>
+  <dialog id="dashboard-layout-dialog"></dialog>
+  <input type="file" id="import-file" accept="application/json" style="display:none" />
+  <input type="file" id="topo-bg-file" accept="image/*" style="display:none" />
+  <div id="toast"></div>
+
+  <!-- config.js setzt window.LM_DEMO (Repo-Default: false). Der Pages-Workflow
+       überschreibt die Datei mit true. demo.js patcht dann fetch() und liefert
+       simulierte API-Daten – muss vor app.js geladen werden. -->
+  <script src="config.js"></script>
+  <script src="demo.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

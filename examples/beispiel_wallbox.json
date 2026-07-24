@@ -1,0 +1,19 @@
+{
+  "name": "Beispiel-Wallbox 22kW",
+  "manufacturer": "Muster GmbH",
+  "notes": "Beispielprofil passend zum mitgelieferten Simulator (tools/simulator.py).",
+  "default_unit_id": 1,
+  "byte_order": "big",
+  "word_order": "big",
+  "registers": [
+    { "key": "current_l1",   "role": "read",  "function_code": 4, "register_address": 100, "data_type": "float32", "scale": 1,   "unit": "A" },
+    { "key": "current_l2",   "role": "read",  "function_code": 4, "register_address": 102, "data_type": "float32", "scale": 1,   "unit": "A" },
+    { "key": "current_l3",   "role": "read",  "function_code": 4, "register_address": 104, "data_type": "float32", "scale": 1,   "unit": "A" },
+    { "key": "active_power", "role": "read",  "function_code": 4, "register_address": 120, "data_type": "uint32",  "scale": 1,   "unit": "W" },
+    { "key": "energy_total", "role": "read",  "function_code": 4, "register_address": 130, "data_type": "uint32",  "scale": 0.1, "unit": "kWh" },
+    { "key": "charge_status","role": "read",  "function_code": 3, "register_address": 200, "data_type": "uint16",
+      "enum_map": { "0": "Verfügbar", "1": "Fahrzeug verbunden", "2": "Lädt", "3": "Fehler" } },
+    { "key": "set_current",  "role": "write", "function_code": 6, "register_address": 300, "data_type": "uint16", "scale": 1, "unit": "A", "writable_min": 6, "writable_max": 32 },
+    { "key": "enable",       "role": "write", "function_code": 6, "register_address": 301, "data_type": "uint16", "writable_min": 0, "writable_max": 1 }
+  ]
+}

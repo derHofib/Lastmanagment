@@ -1,0 +1,42 @@
+[Unit]
+Description=Voltibus Cloud (Registrierung, Login, Fernansicht)
+Documentation=https://github.com/derhofib/lastmanagment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedizierten Benutzer anlegen (empfohlen, siehe README-cloud.md)
+User=voltibus-cloud
+Group=voltibus-cloud
+
+WorkingDirectory=/opt/voltibus-cloud
+Environment=LMC_DATABASE_URL=sqlite:////opt/voltibus-cloud/data/voltibus_cloud.db
+# ZWINGEND einen festen, geheimen Wert setzen, z. B. `openssl rand -hex 32` –
+# ohne diese Variable wird bei jedem Neustart ein neuer Zufallswert erzeugt
+# und alle Nutzer werden abgemeldet.
+Environment=LMC_JWT_SECRET=CHANGE-ME-SIEHE-README-CLOUD
+# Hinter einem TLS-terminierenden Reverse-Proxy (Caddy/nginx) auf true setzen,
+# damit das Session-Cookie nur noch über HTTPS gesendet wird:
+Environment=LMC_COOKIE_SECURE=true
+# Environment=LMC_PORT=9000
+
+ExecStart=/opt/voltibus-cloud/.venv/bin/uvicorn cloud.main:app --host 0.0.0.0 --port 9000
+
+# Robustheit im Dauerbetrieb
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Logging nach journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voltibus-cloud
+
+# Härtung (optional, an Umgebung anpassen)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

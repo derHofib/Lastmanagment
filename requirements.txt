@@ -1,0 +1,15 @@
+# Laufzeitabhängigkeiten für das Lastmanagement
+# Getestet auf Raspberry Pi OS (ARM) mit Python 3.11+
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pymodbus>=3.6
+SQLAlchemy>=2.0
+pydantic>=2.6
+PyYAML>=6.0
+cryptography>=41.0    # Lizenzschlüssel-Prüfung (app/licensing.py)
+httpx>=0.27           # Cloud-Anbindung (app/loadmanager/cloud_relay.py)
+aiomqtt>=2.5          # MQTT-Anbindung (app/loadmanager/mqtt_publisher.py)
+
+# Nur für Tests / Entwicklung
+pytest>=8.0
+pytest-asyncio>=0.23
