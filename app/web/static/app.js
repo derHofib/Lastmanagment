@@ -48,6 +48,8 @@ function showView(name) {
   if (name === "profiles") loadProfiles();
   if (name === "settings") loadSettings();
   if (name === "license") loadLicense();
+  topoActive = name === "topology";
+  if (name === "topology") loadTopology();
 }
 
 let profileCache = [];
@@ -55,8 +57,106 @@ let boardCache = [];
 let stationCache = [];
 let chargePointCache = [];
 
+// --- Dashboard-Anpassung (individuelle Kartenanordnung) --------------------
+const DASHBOARD_WIDGET_LABELS = {
+  "phase-bars": "Gesamtlast pro Phase",
+  "system-info": "Systemzustand",
+  "flow": "Energiefluss",
+  "live-table": "Ladepunkte (Live)",
+};
+const DEFAULT_DASHBOARD_LAYOUT = Object.keys(DASHBOARD_WIDGET_LABELS).map((id) => ({ id, visible: true }));
+
+let dashboardLayoutLoaded = false;
+
+function parseDashboardLayout(raw) {
+  if (!raw) return DEFAULT_DASHBOARD_LAYOUT.slice();
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length) return DEFAULT_DASHBOARD_LAYOUT.slice();
+    // Widgets, die im gespeicherten Layout fehlen (z. B. neu hinzugekommen), ans Ende anhängen
+    const known = new Set(parsed.map((w) => w.id));
+    return parsed.concat(DEFAULT_DASHBOARD_LAYOUT.filter((w) => !known.has(w.id)));
+  } catch (_) {
+    return DEFAULT_DASHBOARD_LAYOUT.slice();
+  }
+}
+
+function applyDashboardLayout(layout) {
+  layout.forEach((w, i) => {
+    const el = document.querySelector(`#dashboard-widgets [data-widget-id="${w.id}"]`);
+    if (!el) return;
+    el.style.order = i;
+    el.style.display = w.visible ? "" : "none";
+  });
+}
+
+async function ensureDashboardLayoutApplied() {
+  if (dashboardLayoutLoaded) return;
+  dashboardLayoutLoaded = true;
+  try {
+    const c = await api("/api/config");
+    applyDashboardLayout(parseDashboardLayout(c.dashboard_layout));
+  } catch (_) { /* Standardlayout (alle Karten sichtbar, Standardreihenfolge) bleibt aktiv */ }
+}
+
+function renderDashboardLayoutDialog(layout) {
+  const dlg = document.getElementById("dashboard-layout-dialog");
+  dlg._layout = layout;
+  const rows = layout.map((w, i) => `
+    <div class="row" style="justify-content:space-between;flex-wrap:nowrap">
+      <label style="display:flex;align-items:center;gap:8px;margin:0">
+        <input type="checkbox" class="dl-visible" data-idx="${i}" ${w.visible ? "checked" : ""}>
+        ${esc(DASHBOARD_WIDGET_LABELS[w.id] || w.id)}
+      </label>
+      <span style="white-space:nowrap">
+        <button type="button" class="btn small secondary" ${i === 0 ? "disabled" : ""} onclick="moveDashboardWidget(${i}, -1)">↑</button>
+        <button type="button" class="btn small secondary" ${i === layout.length - 1 ? "disabled" : ""} onclick="moveDashboardWidget(${i}, 1)">↓</button>
+      </span>
+    </div>`).join("");
+  dlg.innerHTML = `
+    <h2>Dashboard anpassen</h2>
+    <p class="small-note">Karten ein-/ausblenden und mit den Pfeilen umsortieren.</p>
+    <div id="dl-rows">${rows}</div>
+    <div class="row" style="justify-content:flex-end;margin-top:16px">
+      <button class="btn secondary" type="button" onclick="document.getElementById('dashboard-layout-dialog').close()">Abbrechen</button>
+      <button class="btn" type="button" onclick="saveDashboardLayout()">Speichern</button>
+    </div>`;
+}
+
+function collectDashboardLayoutFromDialog() {
+  const dlg = document.getElementById("dashboard-layout-dialog");
+  const layout = dlg._layout;
+  dlg.querySelectorAll(".dl-visible").forEach((cb) => {
+    layout[+cb.dataset.idx].visible = cb.checked;
+  });
+  return layout;
+}
+
+function moveDashboardWidget(idx, dir) {
+  const layout = collectDashboardLayoutFromDialog();
+  const j = idx + dir;
+  if (j < 0 || j >= layout.length) return;
+  [layout[idx], layout[j]] = [layout[j], layout[idx]];
+  renderDashboardLayoutDialog(layout);
+}
+
+async function openDashboardLayout() {
+  const c = await api("/api/config");
+  renderDashboardLayoutDialog(parseDashboardLayout(c.dashboard_layout));
+  document.getElementById("dashboard-layout-dialog").showModal();
+}
+
+async function saveDashboardLayout() {
+  const layout = collectDashboardLayoutFromDialog();
+  await api("/api/config", { method: "PUT", body: JSON.stringify({ dashboard_layout: JSON.stringify(layout) }) });
+  applyDashboardLayout(layout);
+  document.getElementById("dashboard-layout-dialog").close();
+  toast("Dashboard-Layout gespeichert.");
+}
+
 // --- Dashboard -------------------------------------------------------------
 async function refreshDashboard() {
+  await ensureDashboardLayoutApplied();
   let status;
   try { status = await api("/api/status"); }
   catch (e) { return; }
@@ -556,6 +656,279 @@ async function deleteBoard(id) {
   catch (e) { toast(e.message, true); }
 }
 
+// --- Topologie (Baukasten: Verteiler + Ladestationen frei anordnen) --------
+// Freie Positionierung + Stromfluss-Visualisierung. Ergänzt die bestehende,
+// fest-horizontale Energiefluss-Karte (renderFlowDiagram) um beliebige
+// Linien zwischen frei platzierten Knoten. Nutzt bewusst nur bestehende
+// Endpunkte (/api/boards, /api/boards/tree, /api/stations,
+// /api/charge-points, /api/status) statt einer neuen Aggregations-API.
+let topoActive = false;
+let topoDragging = null;
+let topoBoardsCache = [];
+let topoStationsCache = [];
+let topoChargePointsCache = [];
+let topoStationBoards = {};   // station_id -> Set(distribution_board_id|null)
+let topoStationMaxA = {};     // station_id -> Summe max_current_a seiner Ladepunkte
+let topoBoardInfo = {};       // board_id -> { load_a, incoming_fuse_a }
+let topoStationLive = {};     // station_id -> { online, setpoint_a }
+let topoPositions = {};       // "b<id>"/"s<id>" -> { x, y } (aktuell angezeigte Position)
+
+function flattenBoardTree(node, map) {
+  map[node.id] = { load_a: node.load_a, incoming_fuse_a: node.incoming_fuse_a };
+  node.children.forEach((c) => flattenBoardTree(c, map));
+}
+
+function computeTopoFallbackLayout(boards, stations, stationBoards) {
+  const boardById = new Map(boards.map((b) => [b.id, b]));
+  const depthOf = (b) => {
+    let d = 0, cur = b, guard = 0;
+    while (cur && cur.parent_board_id != null && guard++ < 50) {
+      cur = boardById.get(cur.parent_board_id);
+      d++;
+    }
+    return d;
+  };
+  const byDepth = {};
+  boards.forEach((b) => { const d = depthOf(b); (byDepth[d] = byDepth[d] || []).push(b); });
+  const positions = {};
+  const depths = Object.keys(byDepth).map(Number).sort((a, b) => a - b);
+  depths.forEach((d) => {
+    byDepth[d].forEach((b, i) => { positions["b" + b.id] = { x: 40 + d * 220, y: 40 + i * 130 }; });
+  });
+  const maxDepth = depths.length ? Math.max(...depths) : 0;
+  const rootBoard = boards.find((b) => b.parent_board_id === null);
+  const stationsByBoard = {};
+  stations.forEach((s) => {
+    const ids = [...(stationBoards[s.id] || [])];
+    const rawId = ids.length ? ids[0] : null;
+    const bId = rawId == null ? (rootBoard ? rootBoard.id : null) : rawId;
+    (stationsByBoard[bId] = stationsByBoard[bId] || []).push(s);
+  });
+  let row = 0;
+  Object.values(stationsByBoard).forEach((list) => {
+    list.forEach((s) => {
+      positions["s" + s.id] = { x: 40 + (maxDepth + 1) * 220, y: 40 + row * 110 };
+      row++;
+    });
+  });
+  return positions;
+}
+
+async function loadTopology() {
+  const [boards, stations, chargePoints] = await Promise.all([
+    api("/api/boards"), api("/api/stations"), api("/api/charge-points"),
+  ]);
+  topoBoardsCache = boards;
+  topoStationsCache = stations;
+  topoChargePointsCache = chargePoints;
+
+  topoStationBoards = {};
+  topoStationMaxA = {};
+  chargePoints.forEach((cp) => {
+    (topoStationBoards[cp.station_id] = topoStationBoards[cp.station_id] || new Set()).add(cp.distribution_board_id);
+    topoStationMaxA[cp.station_id] = (topoStationMaxA[cp.station_id] || 0) + (cp.max_current_a || 0);
+  });
+
+  const fallback = computeTopoFallbackLayout(boards, stations, topoStationBoards);
+  topoPositions = {};
+  boards.forEach((b) => {
+    topoPositions["b" + b.id] = (b.canvas_x != null && b.canvas_y != null)
+      ? { x: b.canvas_x, y: b.canvas_y } : fallback["b" + b.id] || { x: 40, y: 40 };
+  });
+  stations.forEach((s) => {
+    topoPositions["s" + s.id] = (s.canvas_x != null && s.canvas_y != null)
+      ? { x: s.canvas_x, y: s.canvas_y } : fallback["s" + s.id] || { x: 40, y: 40 };
+  });
+
+  await refreshTopologyLive();
+  renderTopologyNodes();
+}
+
+async function refreshTopologyLive() {
+  try {
+    const [tree, status] = await Promise.all([api("/api/boards/tree"), api("/api/status")]);
+    topoBoardInfo = {};
+    flattenBoardTree(tree, topoBoardInfo);
+    const liveByCp = {};
+    status.charge_points.forEach((cp) => { liveByCp[cp.charge_point_id] = cp; });
+    topoStationLive = {};
+    topoChargePointsCache.forEach((cp) => {
+      const live = liveByCp[cp.id] || {};
+      const agg = topoStationLive[cp.station_id] || { online: false, setpoint_a: 0 };
+      agg.online = agg.online || !!live.online;
+      agg.setpoint_a += live.setpoint_a || 0;
+      topoStationLive[cp.station_id] = agg;
+    });
+  } catch (e) { /* Struktur bleibt sichtbar, nur Live-Werte fehlen dann */ }
+}
+
+function renderTopologyNodes() {
+  const canvas = document.getElementById("topo-canvas");
+  canvas.querySelectorAll(".topo-node").forEach((el) => el.remove());
+
+  topoBoardsCache.forEach((b) => {
+    const pos = topoPositions["b" + b.id] || { x: 40, y: 40 };
+    const el = document.createElement("div");
+    el.className = "topo-node topo-board";
+    el.dataset.key = "b" + b.id;
+    el.style.left = pos.x + "px";
+    el.style.top = pos.y + "px";
+    el.innerHTML = `<div class="topo-title">${esc(b.name)}</div><div class="topo-sub" data-role="load">–</div>`;
+    canvas.appendChild(el);
+    attachTopoDrag(el, "board", b.id);
+  });
+
+  topoStationsCache.forEach((s) => {
+    const pos = topoPositions["s" + s.id] || { x: 40, y: 40 };
+    const el = document.createElement("div");
+    el.className = "topo-node topo-station";
+    el.dataset.key = "s" + s.id;
+    el.style.left = pos.x + "px";
+    el.style.top = pos.y + "px";
+    el.innerHTML = `<div class="topo-title">${esc(s.name)}</div><div class="topo-sub" data-role="live">–</div>`;
+    canvas.appendChild(el);
+    attachTopoDrag(el, "station", s.id);
+  });
+
+  updateTopologyLive();
+}
+
+function updateTopologyLive() {
+  document.querySelectorAll(".topo-board").forEach((el) => {
+    const id = +el.dataset.key.slice(1);
+    const info = topoBoardInfo[id];
+    const sub = el.querySelector('[data-role="load"]');
+    if (info && sub) {
+      const maxPhase = Math.max(0, ...PHASES.map((p) => info.load_a[p] || 0));
+      sub.textContent = `Absicherung ${nf.format(info.incoming_fuse_a)} A · max ${nf.format(maxPhase)} A`;
+    }
+  });
+  document.querySelectorAll(".topo-station").forEach((el) => {
+    const id = +el.dataset.key.slice(1);
+    const live = topoStationLive[id];
+    const sub = el.querySelector('[data-role="live"]');
+    const online = !!(live && live.online);
+    el.classList.toggle("topo-offline", !online);
+    if (sub) sub.textContent = online ? `${nf.format(live.setpoint_a)} A` : "offline";
+  });
+  drawTopoLines();
+}
+
+function topoNodeCenter(key) {
+  const el = document.querySelector(`.topo-node[data-key="${key}"]`);
+  if (!el) return null;
+  return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight / 2 };
+}
+
+function drawTopoLines() {
+  const svg = document.getElementById("topo-lines");
+  svg.innerHTML = "";
+  const addLine = (fromKey, toKey, ratio) => {
+    const a = topoNodeCenter(fromKey), b = topoNodeCenter(toKey);
+    if (!a || !b) return;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("class", "topo-flow-line" + (clamped > 0.01 ? " topo-flow-active" : ""));
+    line.setAttribute("stroke-width", (2 + clamped * 7).toFixed(1));
+    line.style.setProperty("--flow-dur", (1.6 - clamped * 1.2).toFixed(2) + "s");
+    svg.appendChild(line);
+  };
+
+  topoBoardsCache.forEach((b) => {
+    if (b.parent_board_id != null) {
+      const info = topoBoardInfo[b.id];
+      const ratio = info && info.incoming_fuse_a > 0
+        ? Math.max(0, ...PHASES.map((p) => (info.load_a[p] || 0) / info.incoming_fuse_a)) : 0;
+      addLine("b" + b.parent_board_id, "b" + b.id, ratio);
+    }
+  });
+
+  const rootBoard = topoBoardsCache.find((b) => b.parent_board_id === null);
+  topoStationsCache.forEach((s) => {
+    const ids = [...(topoStationBoards[s.id] || [])];
+    const rawId = ids.length ? ids[0] : null;
+    const targetBoardId = rawId == null ? (rootBoard ? rootBoard.id : null) : rawId;
+    if (targetBoardId == null) return;
+    const live = topoStationLive[s.id];
+    const maxA = topoStationMaxA[s.id] || 32;
+    const ratio = live && live.online ? live.setpoint_a / maxA : 0;
+    addLine("b" + targetBoardId, "s" + s.id, ratio);
+  });
+}
+
+function attachTopoDrag(el, type, id) {
+  el.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    el.setPointerCapture(ev.pointerId);
+    const startLeft = el.offsetLeft, startTop = el.offsetTop;
+    const startX = ev.clientX, startY = ev.clientY;
+    topoDragging = el.dataset.key;
+    el.classList.add("dragging");
+
+    const onMove = (mv) => {
+      const nx = Math.max(0, startLeft + (mv.clientX - startX));
+      const ny = Math.max(0, startTop + (mv.clientY - startY));
+      el.style.left = nx + "px";
+      el.style.top = ny + "px";
+      topoPositions[el.dataset.key] = { x: nx, y: ny };
+      drawTopoLines();
+    };
+    const onUp = async (up) => {
+      el.releasePointerCapture(up.pointerId);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.classList.remove("dragging");
+      topoDragging = null;
+      await persistTopoPosition(type, id, topoPositions[el.dataset.key]);
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+  });
+}
+
+async function persistTopoPosition(type, id, pos) {
+  try {
+    if (type === "board") {
+      const b = topoBoardsCache.find((x) => x.id === id);
+      if (!b) return;
+      const { id: _drop, ...body } = b;
+      body.canvas_x = pos.x; body.canvas_y = pos.y;
+      await api("/api/boards/" + id, { method: "PUT", body: JSON.stringify(body) });
+      b.canvas_x = pos.x; b.canvas_y = pos.y;
+    } else {
+      const s = topoStationsCache.find((x) => x.id === id);
+      if (!s) return;
+      const { id: _drop, ...body } = s;
+      body.canvas_x = pos.x; body.canvas_y = pos.y;
+      await api("/api/stations/" + id, { method: "PUT", body: JSON.stringify(body) });
+      s.canvas_x = pos.x; s.canvas_y = pos.y;
+    }
+  } catch (e) {
+    toast("Position konnte nicht gespeichert werden: " + e.message, true);
+  }
+}
+
+async function autoArrangeTopology() {
+  const fallback = computeTopoFallbackLayout(topoBoardsCache, topoStationsCache, topoStationBoards);
+  const ops = [];
+  topoBoardsCache.forEach((b) => {
+    const pos = fallback["b" + b.id];
+    topoPositions["b" + b.id] = pos;
+    ops.push(persistTopoPosition("board", b.id, pos));
+  });
+  topoStationsCache.forEach((s) => {
+    const pos = fallback["s" + s.id];
+    topoPositions["s" + s.id] = pos;
+    ops.push(persistTopoPosition("station", s.id, pos));
+  });
+  await Promise.all(ops);
+  renderTopologyNodes();
+  toast("Automatisch angeordnet.");
+}
+
 // --- Profile ---------------------------------------------------------------
 async function loadProfiles() {
   const profiles = await api("/api/profiles");
@@ -913,3 +1286,8 @@ function val(id) { return document.getElementById(id).value; }
 // Start
 refreshDashboard();
 setInterval(refreshDashboard, 3000);
+setInterval(async () => {
+  if (!topoActive || topoDragging) return;
+  await refreshTopologyLive();
+  updateTopologyLive();
+}, 3000);

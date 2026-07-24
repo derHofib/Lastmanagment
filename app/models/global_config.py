@@ -92,6 +92,11 @@ class GlobalConfig(Base):
     # damit Sensoren automatisch in Home Assistant erscheinen)
     mqtt_ha_discovery: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # --- Anpassbares Dashboard ---
+    # JSON-Array [{"id": "phase-bars", "visible": true}, ...] in Anzeige-
+    # reihenfolge. None = Standardreihenfolge, alle Karten sichtbar.
+    dashboard_layout: Mapped[str | None] = mapped_column(String, nullable=True)
+
     @staticmethod
     def get_or_create(session: Session) -> "GlobalConfig":
         """Liefert die Singleton-Konfiguration, erzeugt sie bei Bedarf."""

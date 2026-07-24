@@ -50,6 +50,11 @@ class DistributionBoard(Base):
     location: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
+    # Position im Baukasten-Topologie-Canvas (frei per Drag&Drop platziert).
+    # None = noch nicht platziert, Frontend nutzt ein Fallback-Rasterlayout.
+    canvas_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     parent: Mapped["DistributionBoard | None"] = relationship(
         "DistributionBoard", remote_side=[id], back_populates="children"
     )

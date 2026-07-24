@@ -65,9 +65,13 @@ _NEW_COLUMNS = {
     "charging_stations": [
         ("distribution_board_id", "INTEGER REFERENCES distribution_boards(id)"),
         ("circuit_breaker_a", "FLOAT"),
+        ("canvas_x", "FLOAT"),
+        ("canvas_y", "FLOAT"),
     ],
     "distribution_boards": [
         ("strategy", "VARCHAR"),
+        ("canvas_x", "FLOAT"),
+        ("canvas_y", "FLOAT"),
     ],
     "global_config": [
         ("cloud_relay_enabled", "BOOLEAN DEFAULT 0"),
@@ -82,6 +86,7 @@ _NEW_COLUMNS = {
         ("mqtt_topic_prefix", "VARCHAR DEFAULT 'voltibus'"),
         ("mqtt_interval_s", "FLOAT DEFAULT 10.0"),
         ("mqtt_ha_discovery", "BOOLEAN DEFAULT 1"),
+        ("dashboard_layout", "TEXT"),
     ],
 }
 

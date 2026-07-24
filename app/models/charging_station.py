@@ -8,7 +8,7 @@ Regel einer, bei Doppel-Wallboxen zwei) – siehe app.models.charge_point.
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -32,6 +32,11 @@ class ChargingStation(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("device_profiles.id"), nullable=False
     )
+
+    # Position im Baukasten-Topologie-Canvas (frei per Drag&Drop platziert).
+    # None = noch nicht platziert, Frontend nutzt ein Fallback-Rasterlayout.
+    canvas_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_y: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     profile: Mapped[DeviceProfile] = relationship("DeviceProfile")
     charge_points: Mapped[list["ChargePoint"]] = relationship(  # noqa: F821

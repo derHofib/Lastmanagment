@@ -42,8 +42,8 @@
       seqSchedule: 1,
       seqBoard: 3,
       boards: [
-        { id: 1, name: "Hauptverteilung", parent_board_id: null, incoming_fuse_a: 63, priority: 0, strategy: null, location: "Hausanschluss", notes: null },
-        { id: 2, name: "UV Garage", parent_board_id: 1, incoming_fuse_a: 35, priority: 0, strategy: null, location: "Carport", notes: null },
+        { id: 1, name: "Hauptverteilung", parent_board_id: null, incoming_fuse_a: 63, priority: 0, strategy: null, location: "Hausanschluss", notes: null, canvas_x: 80, canvas_y: 60 },
+        { id: 2, name: "UV Garage", parent_board_id: 1, incoming_fuse_a: 35, priority: 0, strategy: null, location: "Carport", notes: null, canvas_x: 80, canvas_y: 240 },
       ],
       config: {
         id: 1, grid_limit_current_a: 32, management_mode: "static",
@@ -57,6 +57,7 @@
         mqtt_enabled: false, mqtt_host: null, mqtt_port: 1883, mqtt_username: null,
         mqtt_password: null, mqtt_topic_prefix: "voltibus", mqtt_interval_s: 10,
         mqtt_ha_discovery: true,
+        dashboard_layout: null,
       },
       profiles: [{
         id: 1, name: "Beispiel-Wallbox 22kW", manufacturer: "Muster GmbH",
@@ -64,7 +65,7 @@
         registers,
       }],
       stations: [
-        { id: 1, name: "Garage", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1 },
+        { id: 1, name: "Garage", location: "Carport", ip_address: "192.168.1.50", tcp_port: 502, unit_id: 1, profile_id: 1, canvas_x: 320, canvas_y: 250 },
       ],
       chargePoints: [
         { id: 1, station_id: 1, connector_suffix: "", name: "Ladepunkt links", phase_config: "3p", priority: 5, max_current_a: 32, min_current_a: 6, distribution_board_id: 2, circuit_breaker_a: 16, enabled: true, safe_state: "block", pv_surplus_only: false, schedules: [] },

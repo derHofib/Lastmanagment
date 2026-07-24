@@ -115,6 +115,9 @@ class DistributionBoardBase(BaseModel):
     strategy: DistributionStrategy | None = None
     location: str | None = Field(None, max_length=120)
     notes: str | None = Field(None, max_length=1000)
+    # Position im Baukasten-Topologie-Canvas. None = noch nicht platziert.
+    canvas_x: float | None = None
+    canvas_y: float | None = None
 
 
 class DistributionBoardCreate(DistributionBoardBase):
@@ -174,6 +177,9 @@ class ChargingStationBase(BaseModel):
     tcp_port: int = Field(502, ge=1, le=65535)
     unit_id: int = Field(1, ge=0, le=255)
     profile_id: int
+    # Position im Baukasten-Topologie-Canvas. None = noch nicht platziert.
+    canvas_x: float | None = None
+    canvas_y: float | None = None
 
 
 class ChargingStationCreate(ChargingStationBase):
@@ -282,6 +288,9 @@ class GlobalConfigBase(BaseModel):
     mqtt_topic_prefix: str = Field("voltibus", max_length=120)
     mqtt_interval_s: float = Field(10.0, gt=0)
     mqtt_ha_discovery: bool = True
+    # JSON-Array [{"id": "phase-bars", "visible": true}, ...] in Anzeige-
+    # reihenfolge der Dashboard-Karten. None = Standardreihenfolge.
+    dashboard_layout: str | None = None
 
 
 class GlobalConfigRead(GlobalConfigBase):
@@ -318,6 +327,7 @@ class GlobalConfigUpdate(BaseModel):
     mqtt_topic_prefix: str | None = Field(None, max_length=120)
     mqtt_interval_s: float | None = Field(None, gt=0)
     mqtt_ha_discovery: bool | None = None
+    dashboard_layout: str | None = None
 
 
 # --- Lizenz ------------------------------------------------------------

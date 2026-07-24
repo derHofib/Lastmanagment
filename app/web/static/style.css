@@ -82,6 +82,10 @@ h2 { font-size: 17px; margin: 0 0 14px; font-weight: 600; letter-spacing: -0.01e
   box-shadow: var(--shadow-sm);
 }
 .grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+/* Dashboard-Karten sind flex-Kinder mit steuerbarer "order" (siehe
+   applyDashboardLayout() in app.js), damit sie individuell ein-/ausblend-
+   und umsortierbar sind. */
+.dashboard-widgets { display: flex; flex-direction: column; }
 .phase-bar { margin-bottom: 14px; }
 .phase-bar .label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; color: var(--muted); }
 .phase-bar .label span:first-child { color: var(--text); font-weight: 600; }
@@ -210,3 +214,36 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.32); backdrop-filter: blur(6px); 
 @media (prefers-reduced-motion: reduce) {
   .flow-line::after { animation: none; }
 }
+
+/* Baukasten-Topologie (freie Anordnung von Verteilern + Ladestationen,
+   Stromfluss als animierte SVG-Linien) */
+.topo-canvas-wrap { padding: 0; overflow: auto; max-height: 75vh; }
+.topo-canvas {
+  position: relative;
+  width: 1600px;
+  height: 900px;
+  background-image: radial-gradient(circle, var(--border-strong) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.topo-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.topo-flow-line { stroke: var(--control); stroke-linecap: round; }
+.topo-flow-line.topo-flow-active {
+  stroke: var(--accent);
+  stroke-dasharray: 8 6;
+  animation: topo-flow-move var(--flow-dur, 1s) linear infinite;
+}
+@keyframes topo-flow-move { from { stroke-dashoffset: 28; } to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .topo-flow-line.topo-flow-active { animation: none; }
+}
+.topo-node {
+  position: absolute; min-width: 160px; max-width: 200px;
+  background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-sm);
+  padding: 10px 14px; cursor: grab; user-select: none; touch-action: none;
+}
+.topo-node:active, .topo-node.dragging { cursor: grabbing; box-shadow: var(--shadow-md); z-index: 5; }
+.topo-node.topo-station { border-left-color: #34c759; }
+.topo-node.topo-station.topo-offline { border-left-color: var(--muted); opacity: 0.7; }
+.topo-node .topo-title { font-weight: 600; font-size: 13.5px; }
+.topo-node .topo-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }

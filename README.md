@@ -57,6 +57,11 @@ die Weboberfläche/Datenbank anlegen – ohne den Code zu ändern.
 - **Energiefluss-Visualisierung:** Dashboard-Karte mit PV-Überschuss/
   Netzbezug → Ladepunkte als Fluss-Diagramm, zusätzlich zu den
   Phasen-Balken.
+- **Individuell anpassbares Dashboard:** Karten ein-/ausblenden und
+  umsortieren, Layout wird serverseitig gespeichert.
+- **Baukasten-Topologie:** Verteiler und Ladestationen frei per Drag&Drop
+  auf einer Fläche anordnen; die Verbindungen zeigen den aktuellen
+  Stromfluss (animierte Linien, Dicke nach Auslastung).
 
 ---
 
@@ -334,6 +339,36 @@ geschätzt (`Strom × 230 V`) – **eine vereinfachte Näherung**, keine echte
 Wirkleistungsmessung. Der PV-Überschuss stammt aus
 `phase_surplus_a` (`GET /api/status`), demselben Wert, den auch die
 PV-Überschussladen-Logik verwendet.
+
+---
+
+## Individuell anpassbares Dashboard
+
+Über den Button **„Anpassen"** auf dem Dashboard lassen sich die vier Karten
+(Gesamtlast pro Phase, Systemzustand, Energiefluss, Ladepunkte-Tabelle)
+einzeln ein-/ausblenden und mit Pfeiltasten umsortieren. Das Layout wird als
+JSON in `GlobalConfig.dashboard_layout` gespeichert (`PUT /api/config`) und
+gilt geräteübergreifend für alle, die auf dieselbe Installation zugreifen.
+
+---
+
+## Baukasten-Topologie (Stromfluss-Visualisierung)
+
+Der Reiter **„Topologie"** zeigt Verteiler und Ladestationen als frei
+verschiebbare Kästchen auf einer Fläche (Baukasten-Prinzip): per Ziehen
+(Pointer-Events, kein externes Framework) beliebig anordnen, die Position
+wird beim Loslassen automatisch gespeichert (`canvas_x`/`canvas_y` an
+`DistributionBoard` bzw. `ChargingStation`, über die bestehenden
+`PUT /api/boards/{id}`/`PUT /api/stations/{id}`-Endpunkte). Noch nicht
+platzierte Knoten erscheinen automatisch in einem Rasterlayout nach
+Verteilungshierarchie; der Button **„Auto-Anordnen"** setzt alle Positionen
+darauf zurück.
+
+Die Verbindungen zwischen Verteilern und Ladestationen sind animierte
+SVG-Linien, deren Dicke und Animationsgeschwindigkeit die aktuelle Auslastung
+bzw. den fließenden Ladestrom widerspiegeln (dieselbe Optik wie die
+Energiefluss-Karte, aber mit beliebigen Linien statt eines festen
+horizontalen Layouts) und respektieren `prefers-reduced-motion`.
 
 ---
 

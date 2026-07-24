@@ -15,6 +15,7 @@
       <button data-view="dashboard" class="active">Dashboard</button>
       <button data-view="stations">Ladestationen</button>
       <button data-view="boards">Verteilung</button>
+      <button data-view="topology">Topologie</button>
       <button data-view="profiles">Geräteprofile</button>
       <button data-view="settings">Einstellungen</button>
       <button data-view="license">Lizenz</button>
@@ -25,28 +26,32 @@
   <main>
     <!-- Dashboard -->
     <section id="dashboard" class="view active">
-      <div class="grid">
-        <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">Dashboard</h2>
+        <button class="btn secondary" onclick="openDashboardLayout()">Anpassen</button>
+      </div>
+      <div id="dashboard-widgets" class="dashboard-widgets">
+        <div class="card" data-widget-id="phase-bars">
           <h2>Gesamtlast pro Phase</h2>
           <div id="phase-bars"></div>
         </div>
-        <div class="card">
+        <div class="card" data-widget-id="system-info">
           <h2>Systemzustand</h2>
           <div id="system-info"></div>
         </div>
-      </div>
-      <div class="card">
-        <h2>Energiefluss</h2>
-        <div id="flow-diagram"></div>
-      </div>
-      <div class="card">
-        <h2>Ladepunkte (Live)</h2>
-        <table>
-          <thead>
-            <tr><th>Station</th><th>Status</th><th>Ist-Strom je Phase</th><th>Soll-Strom</th><th>Leistung</th><th>Energie</th></tr>
-          </thead>
-          <tbody id="live-tbody"></tbody>
-        </table>
+        <div class="card" data-widget-id="flow">
+          <h2>Energiefluss</h2>
+          <div id="flow-diagram"></div>
+        </div>
+        <div class="card" data-widget-id="live-table">
+          <h2>Ladepunkte (Live)</h2>
+          <table>
+            <thead>
+              <tr><th>Station</th><th>Status</th><th>Ist-Strom je Phase</th><th>Soll-Strom</th><th>Leistung</th><th>Energie</th></tr>
+            </thead>
+            <tbody id="live-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -73,6 +78,23 @@
           nicht nur die Gesamtgrenze am Hausanschluss.
         </p>
         <div id="board-tree"></div>
+      </div>
+    </section>
+
+    <!-- Topologie (Baukasten: Verteiler + Ladestationen frei anordnen, Stromfluss) -->
+    <section id="topology" class="view">
+      <div class="toolbar">
+        <h2 style="margin:0">Topologie &amp; Stromfluss</h2>
+        <button class="btn secondary" onclick="autoArrangeTopology()">Auto-Anordnen</button>
+      </div>
+      <p class="small-note">
+        Verteiler und Ladestationen frei per Ziehen anordnen. Die Linien zeigen
+        den aktuellen Stromfluss (Dicke/Animation nach Auslastung).
+      </p>
+      <div class="card topo-canvas-wrap">
+        <div id="topo-canvas" class="topo-canvas">
+          <svg id="topo-lines" class="topo-lines"></svg>
+        </div>
       </div>
     </section>
 
@@ -113,6 +135,7 @@
   <dialog id="chargepoint-dialog"></dialog>
   <dialog id="profile-dialog"></dialog>
   <dialog id="board-dialog"></dialog>
+  <dialog id="dashboard-layout-dialog"></dialog>
   <input type="file" id="import-file" accept="application/json" style="display:none" />
   <div id="toast"></div>
 

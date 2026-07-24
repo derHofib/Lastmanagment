@@ -84,6 +84,34 @@ def test_station_crud(client):
     assert client.delete(f"/api/profiles/{pid}").status_code == 204
 
 
+def test_station_canvas_position_roundtrip(client):
+    """Baukasten-Topologie: die frei per Drag&Drop gesetzte Position einer
+    Ladestation wird persistiert (Standard: None, solange nicht platziert)."""
+    pid = client.post("/api/profiles", json=EXAMPLE_PROFILE).json()["id"]
+    station = {
+        "name": "Carport", "ip_address": "192.168.1.60", "tcp_port": 502,
+        "unit_id": 1, "profile_id": pid,
+    }
+    r = client.post("/api/stations", json=station)
+    assert r.status_code == 201, r.text
+    created = r.json()
+    assert created["canvas_x"] is None and created["canvas_y"] is None
+
+    created["canvas_x"] = 42.0
+    created["canvas_y"] = 17.5
+    r = client.put(f"/api/stations/{created['id']}", json=created)
+    assert r.status_code == 200
+    assert r.json()["canvas_x"] == 42.0
+    assert r.json()["canvas_y"] == 17.5
+
+    r = client.get(f"/api/stations/{created['id']}")
+    assert r.json()["canvas_x"] == 42.0
+    assert r.json()["canvas_y"] == 17.5
+
+    client.delete(f"/api/stations/{created['id']}")
+    client.delete(f"/api/profiles/{pid}")
+
+
 def test_config_update(client):
     r = client.get("/api/config")
     assert r.status_code == 200
@@ -97,6 +125,25 @@ def test_config_update(client):
     assert r.status_code == 200
     assert r.json()["grid_limit_current_a"] == 32.0
     assert r.json()["distribution_strategy"] == "priority"
+
+
+def test_dashboard_layout_roundtrip(client):
+    """Individuell anpassbares Dashboard: die gespeicherte Karten-Reihenfolge/
+    -Sichtbarkeit wird als JSON-Text persistiert und unverändert zurückgegeben."""
+    assert client.get("/api/config").json()["dashboard_layout"] is None
+
+    layout = json.dumps([
+        {"id": "flow", "visible": True},
+        {"id": "phase-bars", "visible": False},
+        {"id": "system-info", "visible": True},
+        {"id": "live-table", "visible": True},
+    ])
+    r = client.put("/api/config", json={"dashboard_layout": layout})
+    assert r.status_code == 200
+    assert r.json()["dashboard_layout"] == layout
+
+    r = client.get("/api/config")
+    assert r.json()["dashboard_layout"] == layout
 
 
 def test_status_endpoint(client):
@@ -305,6 +352,31 @@ def test_board_strategy_field_roundtrip(client):
     assert uv_node["strategy"] is None
 
     client.delete(f"/api/boards/{uv_id}")
+
+
+def test_board_canvas_position_roundtrip(client):
+    """Baukasten-Topologie: die frei per Drag&Drop gesetzte Position eines
+    Verteilers wird persistiert (Standard: None, solange nicht platziert)."""
+    root_id = client.get("/api/boards").json()[0]["id"]
+    r = client.post("/api/boards", json={
+        "name": "UV Keller", "parent_board_id": root_id, "incoming_fuse_a": 25,
+    })
+    assert r.status_code == 201, r.text
+    uv = r.json()
+    assert uv["canvas_x"] is None and uv["canvas_y"] is None
+
+    uv["canvas_x"] = 120.5
+    uv["canvas_y"] = 340.0
+    r = client.put(f"/api/boards/{uv['id']}", json=uv)
+    assert r.status_code == 200
+    assert r.json()["canvas_x"] == 120.5
+    assert r.json()["canvas_y"] == 340.0
+
+    r = client.get(f"/api/boards/{uv['id']}")
+    assert r.json()["canvas_x"] == 120.5
+    assert r.json()["canvas_y"] == 340.0
+
+    client.delete(f"/api/boards/{uv['id']}")
 
 
 # --- Lizenzsystem -----------------------------------------------------------
