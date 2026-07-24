@@ -108,7 +108,8 @@ app/
 cloud/                Voltibus Cloud – separater, mandantenfähiger Dienst
                       (Registrierung/Login/Fernansicht), siehe README-cloud.md
 tools/
-  simulator.py         Modbus-TCP-Wallbox-Simulator zum Verifizieren von Profilen
+  simulator.py         Modbus-TCP-Wallbox-Simulator zum Verifizieren von Profilen (statisch)
+  scenario.py          Zeitgeraffter Demo-Ablauf: mehrere Ladepunkte, PV-Tagesgang, §14a, Auto-Setup
   licensing/keygen.py  Vendor-Tool: signierte Lizenzschlüssel ausstellen (nicht Teil der App)
 tests/                Unit- und Integrationstests (Hauptanwendung)
 ```
@@ -433,6 +434,9 @@ journalctl -u lastmanagement -f
 
 ## Test mit dem Simulator (ohne Hardware)
 
+Für einen schnellen, statischen Verbindungstest (konstanter Strom, ein
+einzelner Ladepunkt):
+
 ```bash
 # Terminal 1: simulierte Wallbox auf Port 5020
 source .venv/bin/activate
@@ -444,6 +448,37 @@ uvicorn app.main:app --port 8000
 
 Dann im Web-UI das Beispielprofil importieren, eine Station auf
 `127.0.0.1:5020` anlegen und das Dashboard beobachten.
+
+### Realistisches Zeitraffer-Szenario (`tools/scenario.py`)
+
+Für einen aussagekräftigeren Test – kein konstanter Volllast-Dauerzustand,
+sondern ein realistischer Tagesablauf: mehrere Ladepunkte (inkl. einer
+Doppel-Wallbox), Fahrzeuge stecken sich zufällig an/ab und laden mit
+Rampe/Plateau/Taper statt Sprungfunktion, ein Netzanschlusszähler mit
+Tagesgang (PV-Überschuss mittags, Bezug abends), ein periodisch
+geschaltetes §14a-Steuersignal. Das Skript richtet die laufende Anwendung
+dafür automatisch per REST-API ein (Profile, Verteiler, Stationen,
+Ladepunkte, Konfiguration).
+
+```bash
+# Terminal 1: Anwendung
+uvicorn app.main:app --port 8000
+
+# Terminal 2: Zeitraffer-Szenario (1 reale Minute = 1 simulierte Stunde)
+python -m tools.scenario
+```
+
+Danach im Web-UI zusehen: Dashboard (Energiefluss-Karte reagiert auf den
+PV-Überschuss), *Verteilung* (Unterverteilung „UV Carport" mit 25 A
+Absicherung, an der beide Connectoren der Doppel-Wallbox hängen), *Lizenz*
+unverändert nutzbar. Optionen: `--speed` (Zeitraffer-Faktor, Standard 60),
+`--start-hour` (simulierte Startuhrzeit), `python -m tools.scenario --help`
+für alle Parameter.
+
+**Hinweis:** Der Zeitplan (`ChargeSchedule`) eines Ladepunkts wertet immer
+die echte Systemzeit aus (das ist im Produktivbetrieb so gewollt) – das
+Skript legt das Demo-Sperrfenster deshalb relativ zur tatsächlichen
+Startzeit an und gibt das reale Zeitfenster beim Start auf der Konsole aus.
 
 ---
 
