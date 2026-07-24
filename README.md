@@ -370,9 +370,15 @@ bzw. den fließenden Ladestrom widerspiegeln (dieselbe Optik wie die
 Energiefluss-Karte, aber mit beliebigen Linien statt eines festen
 horizontalen Layouts) und respektieren `prefers-reduced-motion`. Die
 Linienfarbe zeigt die Auslastung als fließenden Farbverlauf: **grün bei 0 %**
-über gelb/orange bis **rot bei 100 %** der jeweiligen Absicherung bzw.
-Anschlussleistung (`topoLoadColor()` in `app.js`, HSL-Interpolation von
-Grün- nach Rot-Farbton).
+über gelb/orange bis **rot bei 100 %** (`topoLoadColor()` in `app.js`,
+HSL-Interpolation von Grün- nach Rot-Farbton). Jede von einem Verteiler
+wegführende Leitung (zu einem Unterverteiler oder einer Station) gehört zu
+DIESEM Verteiler und wird nach dessen eigener Auslastung eingefärbt – also
+individuell je Verteiler (`topoBoardRatio()`: eigene Last relativ zur
+eigenen Zuleitungs-Absicherung `incoming_fuse_a`, unabhängig von
+übergeordneten oder untergeordneten Verteilern). Ein mit 63 A abgesicherter
+Verteiler, der mit 25 A belastet ist, zeigt also 40 % (gelblich-grün), nicht
+100 % (rot).
 
 Bei Stationen mit mehreren Ladepunkten (Doppel-Wallbox) werden die
 Ladepunkte einzeln mit ihrem aktuellen Ladestrom aufgelistet, damit sofort

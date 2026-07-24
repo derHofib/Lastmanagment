@@ -668,7 +668,6 @@ let topoBoardsCache = [];
 let topoStationsCache = [];
 let topoChargePointsCache = [];
 let topoStationBoards = {};   // station_id -> Set(distribution_board_id|null)
-let topoStationMaxA = {};     // station_id -> Summe max_current_a seiner Ladepunkte
 let topoBoardInfo = {};       // board_id -> { load_a, incoming_fuse_a }
 let topoStationLive = {};     // station_id -> { online, setpoint_a }
 let topoCpLive = {};          // charge_point_id -> Live-Objekt aus /api/status
@@ -733,10 +732,8 @@ async function loadTopology() {
   topoChargePointsCache = chargePoints;
 
   topoStationBoards = {};
-  topoStationMaxA = {};
   chargePoints.forEach((cp) => {
     (topoStationBoards[cp.station_id] = topoStationBoards[cp.station_id] || new Set()).add(cp.distribution_board_id);
-    topoStationMaxA[cp.station_id] = (topoStationMaxA[cp.station_id] || 0) + (cp.max_current_a || 0);
   });
 
   const fallback = computeTopoFallbackLayout(boards, stations, topoStationBoards);
@@ -823,7 +820,8 @@ function updateTopologyLive() {
     const sub = el.querySelector('[data-role="load"]');
     if (info && sub) {
       const maxPhase = Math.max(0, ...PHASES.map((p) => info.load_a[p] || 0));
-      sub.textContent = `Absicherung ${nf.format(info.incoming_fuse_a)} A · max ${nf.format(maxPhase)} A`;
+      const pct = info.incoming_fuse_a > 0 ? Math.round((maxPhase / info.incoming_fuse_a) * 100) : 0;
+      sub.textContent = `Absicherung ${nf.format(info.incoming_fuse_a)} A · ${nf.format(maxPhase)} A (${pct} %)`;
     }
   });
   document.querySelectorAll(".topo-station").forEach((el) => {
@@ -856,6 +854,16 @@ function topoNodeCenter(key) {
   return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight / 2 };
 }
 
+// Auslastung EINES Verteilers: sein eigener Lastanteil relativ zu seiner
+// eigenen Zuleitungs-Absicherung (nicht relativ zu einem Kind-Verteiler oder
+// zur Hauptverteilung) – z. B. Verteiler mit 63 A Absicherung und 25 A Last
+// ergibt 40 %, unabhängig davon, was darunter hängt.
+function topoBoardRatio(boardId) {
+  const info = topoBoardInfo[boardId];
+  if (!info || !(info.incoming_fuse_a > 0)) return 0;
+  return Math.max(0, ...PHASES.map((p) => (info.load_a[p] || 0) / info.incoming_fuse_a));
+}
+
 function drawTopoLines() {
   const svg = document.getElementById("topo-lines");
   svg.innerHTML = "";
@@ -873,12 +881,12 @@ function drawTopoLines() {
     svg.appendChild(line);
   };
 
+  // Eine Leitung, die von einem Verteiler wegführt (zu einem Unter-Verteiler
+  // oder einer Station), gehört zu diesem Verteiler – ihre Farbe richtet sich
+  // also nach DESSEN eigener Auslastung, nicht nach der des Ziels.
   topoBoardsCache.forEach((b) => {
     if (b.parent_board_id != null) {
-      const info = topoBoardInfo[b.id];
-      const ratio = info && info.incoming_fuse_a > 0
-        ? Math.max(0, ...PHASES.map((p) => (info.load_a[p] || 0) / info.incoming_fuse_a)) : 0;
-      addLine("b" + b.parent_board_id, "b" + b.id, ratio);
+      addLine("b" + b.parent_board_id, "b" + b.id, topoBoardRatio(b.parent_board_id));
     }
   });
 
@@ -888,10 +896,7 @@ function drawTopoLines() {
     const rawId = ids.length ? ids[0] : null;
     const targetBoardId = rawId == null ? (rootBoard ? rootBoard.id : null) : rawId;
     if (targetBoardId == null) return;
-    const live = topoStationLive[s.id];
-    const maxA = topoStationMaxA[s.id] || 32;
-    const ratio = live && live.online ? live.setpoint_a / maxA : 0;
-    addLine("b" + targetBoardId, "s" + s.id, ratio);
+    addLine("b" + targetBoardId, "s" + s.id, topoBoardRatio(targetBoardId));
   });
 }
 
