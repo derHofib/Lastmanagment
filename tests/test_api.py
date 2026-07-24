@@ -146,6 +146,22 @@ def test_dashboard_layout_roundtrip(client):
     assert r.json()["dashboard_layout"] == layout
 
 
+def test_topology_background_image_roundtrip(client):
+    """Baukasten-Topologie: das hochgeladene Hintergrundbild (data-URL) wird
+    persistiert und kann anschließend wieder entfernt werden (None)."""
+    assert client.get("/api/config").json()["topology_background_image"] is None
+
+    data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+    r = client.put("/api/config", json={"topology_background_image": data_url})
+    assert r.status_code == 200
+    assert r.json()["topology_background_image"] == data_url
+    assert client.get("/api/config").json()["topology_background_image"] == data_url
+
+    r = client.put("/api/config", json={"topology_background_image": None})
+    assert r.status_code == 200
+    assert r.json()["topology_background_image"] is None
+
+
 def test_status_endpoint(client):
     r = client.get("/api/status")
     assert r.status_code == 200

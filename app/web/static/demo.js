@@ -58,6 +58,7 @@
         mqtt_password: null, mqtt_topic_prefix: "voltibus", mqtt_interval_s: 10,
         mqtt_ha_discovery: true,
         dashboard_layout: null,
+        topology_background_image: null,
       },
       profiles: [{
         id: 1, name: "Beispiel-Wallbox 22kW", manufacturer: "Muster GmbH",

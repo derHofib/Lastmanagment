@@ -291,6 +291,8 @@ class GlobalConfigBase(BaseModel):
     # JSON-Array [{"id": "phase-bars", "visible": true}, ...] in Anzeige-
     # reihenfolge der Dashboard-Karten. None = Standardreihenfolge.
     dashboard_layout: str | None = None
+    # Hochgeladenes Hintergrundbild (data:-URL) für den Topologie-Canvas.
+    topology_background_image: str | None = None
 
 
 class GlobalConfigRead(GlobalConfigBase):
@@ -328,6 +330,7 @@ class GlobalConfigUpdate(BaseModel):
     mqtt_interval_s: float | None = Field(None, gt=0)
     mqtt_ha_discovery: bool | None = None
     dashboard_layout: str | None = None
+    topology_background_image: str | None = None
 
 
 # --- Lizenz ------------------------------------------------------------

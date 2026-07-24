@@ -87,6 +87,7 @@ _NEW_COLUMNS = {
         ("mqtt_interval_s", "FLOAT DEFAULT 10.0"),
         ("mqtt_ha_discovery", "BOOLEAN DEFAULT 1"),
         ("dashboard_layout", "TEXT"),
+        ("topology_background_image", "TEXT"),
     ],
 }
 

@@ -368,7 +368,20 @@ Die Verbindungen zwischen Verteilern und Ladestationen sind animierte
 SVG-Linien, deren Dicke und Animationsgeschwindigkeit die aktuelle Auslastung
 bzw. den fließenden Ladestrom widerspiegeln (dieselbe Optik wie die
 Energiefluss-Karte, aber mit beliebigen Linien statt eines festen
-horizontalen Layouts) und respektieren `prefers-reduced-motion`.
+horizontalen Layouts) und respektieren `prefers-reduced-motion`. Die
+Linienfarbe zeigt die Auslastung als fließenden Farbverlauf: **grün bei 0 %**
+über gelb/orange bis **rot bei 100 %** der jeweiligen Absicherung bzw.
+Anschlussleistung (`topoLoadColor()` in `app.js`, HSL-Interpolation von
+Grün- nach Rot-Farbton).
+
+Bei Stationen mit mehreren Ladepunkten (Doppel-Wallbox) werden die
+Ladepunkte einzeln mit ihrem aktuellen Ladestrom aufgelistet, damit sofort
+sichtbar ist, welcher Connector gerade Leistung zieht.
+
+Über **„Hintergrundbild wählen"** lässt sich ein eigenes Bild (z. B. ein Foto
+des Standorts/der Verteilung) als Canvas-Hintergrund hochladen – gespeichert
+als data-URL in `GlobalConfig.topology_background_image` (`PUT /api/config`),
+ersetzt das Standard-Punktraster. **„Hintergrund entfernen"** setzt es zurück.
 
 ---
 

@@ -671,11 +671,20 @@ let topoStationBoards = {};   // station_id -> Set(distribution_board_id|null)
 let topoStationMaxA = {};     // station_id -> Summe max_current_a seiner Ladepunkte
 let topoBoardInfo = {};       // board_id -> { load_a, incoming_fuse_a }
 let topoStationLive = {};     // station_id -> { online, setpoint_a }
+let topoCpLive = {};          // charge_point_id -> Live-Objekt aus /api/status
 let topoPositions = {};       // "b<id>"/"s<id>" -> { x, y } (aktuell angezeigte Position)
 
 function flattenBoardTree(node, map) {
   map[node.id] = { load_a: node.load_a, incoming_fuse_a: node.incoming_fuse_a };
   node.children.forEach((c) => flattenBoardTree(c, map));
+}
+
+// Auslastung 0..1 -> Farbe: grün (0 %) über gelb/orange bis rot (100 %),
+// als Farbton-Interpolation (angenehmerer Verlauf als eine reine RGB-Mischung).
+function topoLoadColor(ratio) {
+  const r = Math.max(0, Math.min(1, ratio));
+  const hue = 130 - 130 * r;
+  return `hsl(${hue.toFixed(0)}, 75%, 42%)`;
 }
 
 function computeTopoFallbackLayout(boards, stations, stationBoards) {
@@ -715,9 +724,10 @@ function computeTopoFallbackLayout(boards, stations, stationBoards) {
 }
 
 async function loadTopology() {
-  const [boards, stations, chargePoints] = await Promise.all([
-    api("/api/boards"), api("/api/stations"), api("/api/charge-points"),
+  const [boards, stations, chargePoints, cfg] = await Promise.all([
+    api("/api/boards"), api("/api/stations"), api("/api/charge-points"), api("/api/config"),
   ]);
+  applyTopoBackground(cfg.topology_background_image);
   topoBoardsCache = boards;
   topoStationsCache = stations;
   topoChargePointsCache = chargePoints;
@@ -751,6 +761,7 @@ async function refreshTopologyLive() {
     flattenBoardTree(tree, topoBoardInfo);
     const liveByCp = {};
     status.charge_points.forEach((cp) => { liveByCp[cp.charge_point_id] = cp; });
+    topoCpLive = liveByCp;
     topoStationLive = {};
     topoChargePointsCache.forEach((cp) => {
       const live = liveByCp[cp.id] || {};
@@ -785,7 +796,19 @@ function renderTopologyNodes() {
     el.dataset.key = "s" + s.id;
     el.style.left = pos.x + "px";
     el.style.top = pos.y + "px";
-    el.innerHTML = `<div class="topo-title">${esc(s.name)}</div><div class="topo-sub" data-role="live">–</div>`;
+    const cps = topoChargePointsCache.filter((cp) => cp.station_id === s.id);
+    if (cps.length > 1) {
+      // Doppel-Wallbox o. Ä.: jeder Ladepunkt einzeln, damit sichtbar ist,
+      // welcher Connector gerade Leistung zieht.
+      const rows = cps.map((cp) => `
+        <div class="topo-cp-row" data-cp-id="${cp.id}">
+          <span class="topo-cp-name">${esc(cp.name)}</span>
+          <span class="topo-cp-val" data-role="cp-val">–</span>
+        </div>`).join("");
+      el.innerHTML = `<div class="topo-title">${esc(s.name)}</div><div class="topo-cps">${rows}</div>`;
+    } else {
+      el.innerHTML = `<div class="topo-title">${esc(s.name)}</div><div class="topo-sub" data-role="live">–</div>`;
+    }
     canvas.appendChild(el);
     attachTopoDrag(el, "station", s.id);
   });
@@ -810,6 +833,19 @@ function updateTopologyLive() {
     const online = !!(live && live.online);
     el.classList.toggle("topo-offline", !online);
     if (sub) sub.textContent = online ? `${nf.format(live.setpoint_a)} A` : "offline";
+
+    el.querySelectorAll(".topo-cp-row").forEach((row) => {
+      const cpId = +row.dataset.cpId;
+      const cp = topoChargePointsCache.find((c) => c.id === cpId);
+      const cpLive = topoCpLive[cpId];
+      const valEl = row.querySelector('[data-role="cp-val"]');
+      if (!valEl) return;
+      const cpOnline = !!(cpLive && cpLive.online);
+      const maxA = (cp && cp.max_current_a) || 32;
+      const ratio = cpOnline ? (cpLive.setpoint_a || 0) / maxA : 0;
+      valEl.textContent = cpOnline ? `${nf.format(cpLive.setpoint_a || 0)} A` : "–";
+      valEl.style.color = cpOnline ? topoLoadColor(ratio) : "";
+    });
   });
   drawTopoLines();
 }
@@ -832,6 +868,7 @@ function drawTopoLines() {
     line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
     line.setAttribute("class", "topo-flow-line" + (clamped > 0.01 ? " topo-flow-active" : ""));
     line.setAttribute("stroke-width", (2 + clamped * 7).toFixed(1));
+    line.style.stroke = topoLoadColor(clamped);
     line.style.setProperty("--flow-dur", (1.6 - clamped * 1.2).toFixed(2) + "s");
     svg.appendChild(line);
   };
@@ -856,6 +893,51 @@ function drawTopoLines() {
     const ratio = live && live.online ? live.setpoint_a / maxA : 0;
     addLine("b" + targetBoardId, "s" + s.id, ratio);
   });
+}
+
+// --- Topologie: eigenes Hintergrundbild (z. B. Standortfoto) --------------
+function applyTopoBackground(dataUrl) {
+  const canvas = document.getElementById("topo-canvas");
+  if (dataUrl) {
+    canvas.classList.remove("topo-grid-bg");
+    canvas.style.backgroundImage = `url("${dataUrl}")`;
+  } else {
+    canvas.classList.add("topo-grid-bg");
+    canvas.style.backgroundImage = "";
+  }
+}
+
+function chooseTopoBackground() {
+  const input = document.getElementById("topo-bg-file");
+  input.onchange = async () => {
+    const file = input.files[0];
+    input.value = "";
+    if (!file) return;
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify({ topology_background_image: dataUrl }) });
+      applyTopoBackground(dataUrl);
+      toast("Hintergrundbild gespeichert.");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+  input.click();
+}
+
+async function removeTopoBackground() {
+  try {
+    await api("/api/config", { method: "PUT", body: JSON.stringify({ topology_background_image: null }) });
+    applyTopoBackground(null);
+    toast("Hintergrundbild entfernt.");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 function attachTopoDrag(el, type, id) {

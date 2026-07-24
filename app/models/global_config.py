@@ -97,6 +97,12 @@ class GlobalConfig(Base):
     # reihenfolge. None = Standardreihenfolge, alle Karten sichtbar.
     dashboard_layout: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # --- Baukasten-Topologie ---
+    # Vom Nutzer hochgeladenes Hintergrundbild (z. B. Foto des Standorts) für
+    # den Topologie-Canvas, als data:-URL gespeichert. None = kein Bild
+    # (Punktraster-Standardhintergrund).
+    topology_background_image: Mapped[str | None] = mapped_column(String, nullable=True)
+
     @staticmethod
     def get_or_create(session: Session) -> "GlobalConfig":
         """Liefert die Singleton-Konfiguration, erzeugt sie bei Bedarf."""

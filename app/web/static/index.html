@@ -85,14 +85,20 @@
     <section id="topology" class="view">
       <div class="toolbar">
         <h2 style="margin:0">Topologie &amp; Stromfluss</h2>
-        <button class="btn secondary" onclick="autoArrangeTopology()">Auto-Anordnen</button>
+        <div class="row" style="margin:0">
+          <button class="btn secondary" onclick="chooseTopoBackground()">Hintergrundbild wählen</button>
+          <button class="btn secondary" onclick="removeTopoBackground()">Hintergrund entfernen</button>
+          <button class="btn secondary" onclick="autoArrangeTopology()">Auto-Anordnen</button>
+        </div>
       </div>
       <p class="small-note">
         Verteiler und Ladestationen frei per Ziehen anordnen. Die Linien zeigen
-        den aktuellen Stromfluss (Dicke/Animation nach Auslastung).
+        den aktuellen Stromfluss: grün bei 0&nbsp;% Auslastung, rot bei 100&nbsp;%.
+        Ein eigenes Hintergrundbild (z.&nbsp;B. ein Foto des Standorts) hilft bei
+        der Zuordnung.
       </p>
       <div class="card topo-canvas-wrap">
-        <div id="topo-canvas" class="topo-canvas">
+        <div id="topo-canvas" class="topo-canvas topo-grid-bg">
           <svg id="topo-lines" class="topo-lines"></svg>
         </div>
       </div>
@@ -137,6 +143,7 @@
   <dialog id="board-dialog"></dialog>
   <dialog id="dashboard-layout-dialog"></dialog>
   <input type="file" id="import-file" accept="application/json" style="display:none" />
+  <input type="file" id="topo-bg-file" accept="image/*" style="display:none" />
   <div id="toast"></div>
 
   <!-- config.js setzt window.LM_DEMO (Repo-Default: false). Der Pages-Workflow
