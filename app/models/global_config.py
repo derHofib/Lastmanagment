@@ -77,6 +77,21 @@ class GlobalConfig(Base):
     cloud_relay_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cloud_relay_interval_s: Mapped[float] = mapped_column(Float, default=30.0, nullable=False)
 
+    # --- MQTT-Anbindung (Status veröffentlichen, z. B. für Home Assistant) ---
+    # Rein additiv: veröffentlicht periodisch denselben Stand wie
+    # GET /api/status; Verbindungsfehler beeinflussen die Regelung nie
+    # (siehe app.loadmanager.mqtt_publisher).
+    mqtt_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mqtt_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mqtt_port: Mapped[int] = mapped_column(Integer, default=1883, nullable=False)
+    mqtt_username: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    mqtt_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mqtt_topic_prefix: Mapped[str] = mapped_column(String(120), default="voltibus", nullable=False)
+    mqtt_interval_s: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    # Home-Assistant-MQTT-Discovery mitsenden (retained Discovery-Topics,
+    # damit Sensoren automatisch in Home Assistant erscheinen)
+    mqtt_ha_discovery: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
     @staticmethod
     def get_or_create(session: Session) -> "GlobalConfig":
         """Liefert die Singleton-Konfiguration, erzeugt sie bei Bedarf."""

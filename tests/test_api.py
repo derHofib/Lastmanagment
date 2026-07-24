@@ -105,6 +105,7 @@ def test_status_endpoint(client):
     body = r.json()
     assert "phase_load_a" in body
     assert set(body["phase_load_a"]) == {"L1", "L2", "L3"}
+    assert set(body["phase_surplus_a"]) == {"L1", "L2", "L3"}
 
 
 def test_healthz(client):

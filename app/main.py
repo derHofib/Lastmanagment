@@ -23,6 +23,7 @@ from app.api import (
 from app.db import init_db
 from app.loadmanager.cloud_relay import service as cloud_relay_service
 from app.loadmanager.loop import service
+from app.loadmanager.mqtt_publisher import service as mqtt_publisher_service
 from app.logging_config import setup_logging
 
 log = logging.getLogger("lastmanagement")
@@ -32,15 +33,17 @@ STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialisiert DB und startet/stoppt Regelzyklus + Cloud-Anbindung."""
+    """Initialisiert DB und startet/stoppt Regelzyklus + Cloud-/MQTT-Anbindung."""
     setup_logging()
     init_db()
     log.info("Lastmanagement %s startet", __version__)
     service.start()
     cloud_relay_service.start()
+    mqtt_publisher_service.start()
     try:
         yield
     finally:
+        await mqtt_publisher_service.stop()
         await cloud_relay_service.stop()
         await service.stop()
         log.info("Lastmanagement beendet")

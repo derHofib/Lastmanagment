@@ -274,6 +274,14 @@ class GlobalConfigBase(BaseModel):
     cloud_relay_url: str | None = Field(None, max_length=255)
     cloud_relay_token: str | None = Field(None, max_length=255)
     cloud_relay_interval_s: float = Field(30.0, gt=0)
+    mqtt_enabled: bool = False
+    mqtt_host: str | None = Field(None, max_length=255)
+    mqtt_port: int = Field(1883, ge=1, le=65535)
+    mqtt_username: str | None = Field(None, max_length=120)
+    mqtt_password: str | None = Field(None, max_length=255)
+    mqtt_topic_prefix: str = Field("voltibus", max_length=120)
+    mqtt_interval_s: float = Field(10.0, gt=0)
+    mqtt_ha_discovery: bool = True
 
 
 class GlobalConfigRead(GlobalConfigBase):
@@ -302,6 +310,14 @@ class GlobalConfigUpdate(BaseModel):
     cloud_relay_url: str | None = Field(None, max_length=255)
     cloud_relay_token: str | None = Field(None, max_length=255)
     cloud_relay_interval_s: float | None = Field(None, gt=0)
+    mqtt_enabled: bool | None = None
+    mqtt_host: str | None = Field(None, max_length=255)
+    mqtt_port: int | None = Field(None, ge=1, le=65535)
+    mqtt_username: str | None = Field(None, max_length=120)
+    mqtt_password: str | None = Field(None, max_length=255)
+    mqtt_topic_prefix: str | None = Field(None, max_length=120)
+    mqtt_interval_s: float | None = Field(None, gt=0)
+    mqtt_ha_discovery: bool | None = None
 
 
 # --- Lizenz ------------------------------------------------------------
@@ -350,6 +366,9 @@ class SystemStatus(BaseModel):
     en14a_active: bool
     phase_load_a: dict[str, float]
     phase_available_a: dict[str, float]
+    # PV-Überschuss (Einspeisung) je Phase, aus dem Netzanschlusszähler
+    # abgeleitet (nur > 0 im dynamischen Modus mit angeschlossenem Zähler).
+    phase_surplus_a: dict[str, float]
     active_charge_points: int
     total_charge_points: int
     last_cycle: str | None = None

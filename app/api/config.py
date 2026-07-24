@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.loadmanager.cloud_relay import service as cloud_relay_service
+from app.loadmanager.mqtt_publisher import service as mqtt_publisher_service
 from app.models import DeviceProfile, GlobalConfig
 from app.schemas import GlobalConfigRead, GlobalConfigUpdate
 
@@ -38,3 +39,11 @@ async def test_cloud_relay():
     (unabhängig davon, ob die Anbindung bereits aktiviert ist) – für den
     „Verbindung jetzt testen"-Button in den Einstellungen."""
     return await cloud_relay_service.test_now()
+
+
+@router.post("/mqtt/test")
+async def test_mqtt():
+    """Sendet einmalig den aktuellen Status an den konfigurierten
+    MQTT-Broker (unabhängig davon, ob die Anbindung bereits aktiviert ist)
+    – für den „Verbindung jetzt testen"-Button in den Einstellungen."""
+    return await mqtt_publisher_service.test_now()

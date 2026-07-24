@@ -51,6 +51,12 @@ die Weboberfläche/Datenbank anlegen – ohne den Code zu ändern.
   Fernansicht der eigenen Installation(en) – Registrierung, Login,
   Status-Dashboard. Ausfälle der Cloud-Verbindung beeinflussen die lokale
   Regelung nie (siehe `README-cloud.md`).
+- **MQTT-Anbindung (optional):** veröffentlicht denselben Status zusätzlich
+  per MQTT (z. B. für Home Assistant/Node-RED), inkl. Home-Assistant-MQTT-
+  Discovery. Ebenfalls fehlertolerant – keine Auswirkung auf die Regelung.
+- **Energiefluss-Visualisierung:** Dashboard-Karte mit PV-Überschuss/
+  Netzbezug → Ladepunkte als Fluss-Diagramm, zusätzlich zu den
+  Phasen-Balken.
 
 ---
 
@@ -92,8 +98,9 @@ app/
     smoothing.py      Hysterese / Mindesthaltezeiten
     safety.py         Fail-Safe & konservative Kapazitätsreservierung
     schedule.py       Zeitsteuerung (wiederkehrende Sperrfenster)
-    status_builder.py Baut den Systemzustand (für API + Cloud-Relay gemeinsam)
+    status_builder.py  Baut den Systemzustand (für API, Cloud-Relay, MQTT gemeinsam)
     cloud_relay.py     Optionales "Phone-Home" an Voltibus Cloud
+    mqtt_publisher.py  Optionale MQTT-Anbindung (inkl. Home-Assistant-Discovery)
     loop.py           Regelzyklus (Polling → Verteilung → Sollwerte schreiben)
   api/                REST-Endpunkte (Profile, Stationen, Ladepunkte, Verteiler, Config, Lizenz, Status)
   web/static/         Schlankes Web-UI (HTML/JS + Fetch)
@@ -289,6 +296,46 @@ unabhängiger Hintergrund-Task.
 
 ---
 
+## MQTT-Anbindung (optional)
+
+Veröffentlicht denselben Systemzustand zusätzlich per MQTT
+(`app/loadmanager/mqtt_publisher.py`) – für Home Assistant, Node-RED oder
+eigene Auswertungen. Einstellbar unter *Einstellungen → MQTT* (Broker-Host/
+Port, Zugangsdaten, Topic-Präfix, Intervall). Läuft als eigener,
+unabhängiger Hintergrund-Task nach demselben Prinzip wie die
+Cloud-Anbindung: Verbindungsfehler werden geloggt und ignoriert, **die
+lokale Regelung ist nie betroffen**.
+
+Veröffentlicht werden Topics wie `<prefix>/status/phase_load_a/L1`,
+`<prefix>/chargepoints/<id>/current_l1`, `.../setpoint_a`, `.../power` usw.
+Mit aktivierter **Home-Assistant-MQTT-Discovery** (Standard: an) erscheinen
+passende Sensoren automatisch in Home Assistant, ohne manuelle
+YAML-Konfiguration dort.
+
+Bewusst **nur Publish** – Sollwerte lassen sich nicht per MQTT setzen. Das
+wäre eine eigene Sicherheits-/Validierungsfrage (wer darf die Ladeleistung
+per MQTT ändern?) und ist nicht Teil dieser Anbindung.
+
+---
+
+## Energiefluss-Visualisierung
+
+Das Dashboard zeigt zusätzlich zu den Phasen-Balken eine Energiefluss-Karte:
+PV-Überschuss (falls dynamisches Lastmanagement mit Zähler aktiv und
+Überschuss vorhanden) und Netzbezug fließen zu den Ladepunkten, mit
+Leistungsangabe je Zweig und animierten Verbindungslinien (Liniendicke/
+-geschwindigkeit nach Leistung skaliert, respektiert
+`prefers-reduced-motion`).
+
+Die Leistung wird bevorzugt aus vorhandenen `active_power`-Registern der
+Ladepunkte gebildet; ist keines vorhanden, aus der Summe der Phasenströme
+geschätzt (`Strom × 230 V`) – **eine vereinfachte Näherung**, keine echte
+Wirkleistungsmessung. Der PV-Überschuss stammt aus
+`phase_surplus_a` (`GET /api/status`), demselben Wert, den auch die
+PV-Überschussladen-Logik verwendet.
+
+---
+
 ## Geräteprofil (Import/Export-Format)
 
 Ein Profil ist als JSON import-/exportierbar (siehe
@@ -464,6 +511,10 @@ Abgedeckt:
   auszuführen): Registrierung/Login/Logout, Installationen (Anlegen,
   Token-Rotation, Löschen, Mandantentrennung zwischen Nutzern), Ingest mit
   gültigem/ungültigem Token.
+- **MQTT-Anbindung** (`tests/test_mqtt_publisher.py`): sendet nur bei
+  aktivierter Anbindung und vorhandenem Host, Status- und
+  Discovery-Topics (retained) korrekt getrennt, schluckt Verbindungs-/
+  Publish-Fehler ohne zu werfen.
 
 ---
 
@@ -497,9 +548,10 @@ Datenbank gehalten.
 | GET/POST | `/api/boards` | Verteiler auflisten/anlegen |
 | PUT/DELETE | `/api/boards/{id}` | Verteiler ändern/löschen |
 | GET | `/api/boards/tree` | kompletter Verteilungsbaum inkl. Live-Auslastung |
-| GET/PUT | `/api/config` | globale Grenzwerte & Modus (inkl. Cloud-Anbindung) |
+| GET/PUT | `/api/config` | globale Grenzwerte & Modus (inkl. Cloud-/MQTT-Anbindung) |
 | POST | `/api/config/cloud-relay/test` | Cloud-Verbindung sofort testen |
-| GET | `/api/status` | Systemzustand (Last/Reserve/Ladepunkte) |
+| POST | `/api/config/mqtt/test` | MQTT-Verbindung sofort testen |
+| GET | `/api/status` | Systemzustand (Last/Reserve/PV-Überschuss/Ladepunkte) |
 | GET | `/api/license` | aktuelle Lizenzstufe & Stationsnutzung |
 | POST | `/api/license/activate` | Lizenzschlüssel aktivieren |
 

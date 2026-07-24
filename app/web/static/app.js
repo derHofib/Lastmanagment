@@ -73,6 +73,7 @@ async function refreshDashboard() {
     </div>`;
   }).join("");
   document.getElementById("phase-bars").innerHTML = bars;
+  renderFlowDiagram(status);
 
   const modeTxt = { static: "Statisch", dynamic: "Dynamisch" }[status.management_mode] || status.management_mode;
   const stratTxt = STRATEGY_TXT[status.distribution_strategy] || status.distribution_strategy;
@@ -113,6 +114,79 @@ async function refreshDashboard() {
     document.getElementById("cycle-info").textContent =
       "Letzter Zyklus: " + t.toLocaleTimeString("de-DE");
   }
+}
+
+// --- Energiefluss (vereinfachte Visualisierung) -----------------------------
+
+function fmtKw(w) {
+  return (w / 1000).toFixed(w >= 1000 ? 1 : 2) + " kW";
+}
+
+function estimateChargingPowerW(status) {
+  // Bevorzugt echte Wirkleistungswerte (active_power-Register), falls im
+  // Profil vorhanden; sonst Schätzung aus den Phasenströmen (P = I × 230 V).
+  // Bewusst als Näherung gekennzeichnet, siehe Hinweistext unten.
+  let sum = 0, any = false;
+  status.charge_points.forEach((cp) => {
+    const v = cp.values || {};
+    if (typeof v.active_power === "number") { sum += v.active_power; any = true; }
+  });
+  if (any) return sum;
+  const load = status.phase_load_a || {};
+  return PHASES.reduce((s, p) => s + (load[p] || 0), 0) * 230;
+}
+
+function estimateSurplusW(status) {
+  const s = status.phase_surplus_a || {};
+  return PHASES.reduce((sum, p) => sum + (s[p] || 0), 0) * 230;
+}
+
+function renderFlowDiagram(status) {
+  const el = document.getElementById("flow-diagram");
+  const chargingW = estimateChargingPowerW(status);
+  const rawSurplusW = status.management_mode === "dynamic" ? estimateSurplusW(status) : 0;
+  // PV kann im Diagramm nicht mehr "liefern" als tatsächlich geladen wird –
+  // überschüssiger PV-Strom, der nicht zum Laden genutzt wird, ist hier
+  // nicht Teil der Darstellung (reines Ladepunkt-Energiefluss-Bild).
+  const surplusW = Math.min(rawSurplusW, chargingW);
+  const gridW = Math.max(0, chargingW - surplusW);
+  const hasPv = surplusW > 1;
+  const maxW = Math.max(chargingW, 1);
+
+  const lineStyle = (w) => {
+    const ratio = Math.min(1, w / maxW);
+    const height = (3 + ratio * 8).toFixed(1);
+    const duration = (1.6 - ratio * 1.2).toFixed(2);
+    return `--flow-h:${height}px; --flow-dur:${duration}s`;
+  };
+
+  el.innerHTML = `
+    <div class="flow-wrap">
+      <div class="flow-sources">
+        ${hasPv ? `
+        <div class="flow-node flow-pv">
+          <span class="flow-label">PV-Überschuss</span>
+          <span class="flow-value">${fmtKw(surplusW)}</span>
+        </div>` : ""}
+        <div class="flow-node flow-grid">
+          <span class="flow-label">Netzbezug</span>
+          <span class="flow-value">${fmtKw(gridW)}</span>
+        </div>
+      </div>
+      <div class="flow-lines">
+        ${hasPv ? `<div class="flow-line flow-line-pv" style="${lineStyle(surplusW)}"></div>` : ""}
+        <div class="flow-line flow-line-grid" style="${lineStyle(gridW)}"></div>
+      </div>
+      <div class="flow-node flow-cp">
+        <span class="flow-label">Ladepunkte</span>
+        <span class="flow-value">${fmtKw(chargingW)}</span>
+      </div>
+    </div>
+    <p class="small-note" style="margin-top:10px">
+      Vereinfachte Darstellung: Leistung aus Wirkleistungs-Registern, sonst aus
+      Strom × 230 V geschätzt (keine echte Wirkleistungsmessung ohne
+      entsprechendes Profil-Register).
+    </p>`;
 }
 
 // --- Stationen (physische Verbindung) + Ladepunkte ------------------------
@@ -694,6 +768,33 @@ async function loadSettings() {
       <button class="btn secondary" type="button" onclick="testCloudRelay()">Verbindung jetzt testen</button>
       <span id="cloud-test-result" class="muted"></span>
     </div>
+    <h2 style="margin-top:16px">MQTT (optional)</h2>
+    <p class="small-note" style="margin-bottom:10px">
+      Veröffentlicht denselben Status auch per MQTT (z. B. für Home Assistant
+      oder Node-RED). Mit Home-Assistant-Discovery erscheinen die Sensoren
+      dort automatisch. Verbindungsfehler haben keinerlei Einfluss auf die
+      lokale Regelung.
+    </p>
+    <div class="row">
+      <div class="field"><label>Aktiviert</label>
+        <select id="c-mqtt-en"><option value="true" ${c.mqtt_enabled ? "selected" : ""}>ja</option>
+        <option value="false" ${!c.mqtt_enabled ? "selected" : ""}>nein</option></select></div>
+      <div class="field" style="flex:2 1 220px"><label>Broker-Host</label><input id="c-mqtt-host" placeholder="192.168.1.10" value="${esc(c.mqtt_host || "")}"></div>
+      <div class="field"><label>Port</label><input id="c-mqtt-port" type="number" value="${c.mqtt_port}"></div>
+      <div class="field"><label>Intervall (s)</label><input id="c-mqtt-interval" type="number" step="1" value="${c.mqtt_interval_s}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Benutzername</label><input id="c-mqtt-user" value="${esc(c.mqtt_username || "")}"></div>
+      <div class="field"><label>Passwort</label><input id="c-mqtt-pass" type="password" value="${esc(c.mqtt_password || "")}"></div>
+      <div class="field"><label>Topic-Präfix</label><input id="c-mqtt-prefix" value="${esc(c.mqtt_topic_prefix)}"></div>
+      <div class="field"><label>Home-Assistant-Discovery</label>
+        <select id="c-mqtt-ha"><option value="true" ${c.mqtt_ha_discovery ? "selected" : ""}>ja</option>
+        <option value="false" ${!c.mqtt_ha_discovery ? "selected" : ""}>nein</option></select></div>
+    </div>
+    <div class="row">
+      <button class="btn secondary" type="button" onclick="testMqtt()">Verbindung jetzt testen</button>
+      <span id="mqtt-test-result" class="muted"></span>
+    </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px">
       <button class="btn" onclick="saveSettings()">Speichern</button>
     </div>`;
@@ -715,6 +816,14 @@ async function saveSettings() {
     cloud_relay_url: val("c-cloud-url") || null,
     cloud_relay_token: val("c-cloud-token") || null,
     cloud_relay_interval_s: +val("c-cloud-interval"),
+    mqtt_enabled: val("c-mqtt-en") === "true",
+    mqtt_host: val("c-mqtt-host") || null,
+    mqtt_port: +val("c-mqtt-port"),
+    mqtt_username: val("c-mqtt-user") || null,
+    mqtt_password: val("c-mqtt-pass") || null,
+    mqtt_topic_prefix: val("c-mqtt-prefix") || "voltibus",
+    mqtt_interval_s: +val("c-mqtt-interval"),
+    mqtt_ha_discovery: val("c-mqtt-ha") === "true",
   };
   try { await api("/api/config", { method: "PUT", body: JSON.stringify(body) }); toast("Einstellungen gespeichert."); }
   catch (e) { toast(e.message, true); }
@@ -728,6 +837,22 @@ async function testCloudRelay() {
     // (nicht die zuletzt gespeicherten) Zugangsdaten verwendet.
     await saveSettings();
     const r = await api("/api/config/cloud-relay/test", { method: "POST" });
+    el.textContent = r.ok ? "✓ Verbindung erfolgreich." : "✗ " + r.error;
+    el.style.color = r.ok ? "var(--ok)" : "var(--err)";
+  } catch (e) {
+    el.textContent = "✗ " + e.message;
+    el.style.color = "var(--err)";
+  }
+}
+
+async function testMqtt() {
+  const el = document.getElementById("mqtt-test-result");
+  el.textContent = "Sende Test …";
+  try {
+    // Aktuelle Felder zuerst speichern, damit der Test die eingegebenen
+    // (nicht die zuletzt gespeicherten) Zugangsdaten verwendet.
+    await saveSettings();
+    const r = await api("/api/config/mqtt/test", { method: "POST" });
     el.textContent = r.ok ? "✓ Verbindung erfolgreich." : "✗ " + r.error;
     el.style.color = r.ok ? "var(--ok)" : "var(--err)";
   } catch (e) {

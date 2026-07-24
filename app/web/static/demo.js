@@ -54,6 +54,9 @@
         en14a_enabled: false, en14a_active: false, en14a_limit_current_a: 6,
         cloud_relay_enabled: false, cloud_relay_url: null, cloud_relay_token: null,
         cloud_relay_interval_s: 30,
+        mqtt_enabled: false, mqtt_host: null, mqtt_port: 1883, mqtt_username: null,
+        mqtt_password: null, mqtt_topic_prefix: "voltibus", mqtt_interval_s: 10,
+        mqtt_ha_discovery: true,
       },
       profiles: [{
         id: 1, name: "Beispiel-Wallbox 22kW", manufacturer: "Muster GmbH",
@@ -138,6 +141,8 @@
     return targets;
   }
 
+  const SIMULATED_SURPLUS_A = 12; // Demo-Fixwert für PV-Überschuss je Phase
+
   function allocate() {
     const cfg = state.config;
     let limit = cfg.grid_limit_current_a;
@@ -152,21 +157,31 @@
     state.chargePoints.forEach((cp) => (setpoints[cp.id] = 0));
     Object.assign(setpoints, waterFill(gridCps, limit));
 
+    // Meter-Überschuss: im Demo-Modus unabhängig davon simuliert, ob gerade
+    // ein PV-Ladepunkt angeschlossen ist (spiegelt die echte Anwendung, wo
+    // der Zähler den Überschuss unabhängig von der Nachfrage meldet).
+    const dynamicMeterActive = cfg.management_mode === "dynamic" && cfg.dynamic_meter_enabled;
+    const surplus = dynamicMeterActive
+      ? { L1: SIMULATED_SURPLUS_A, L2: SIMULATED_SURPLUS_A, L3: SIMULATED_SURPLUS_A }
+      : { L1: 0, L2: 0, L3: 0 };
+
     // PV-Only: nur eine plausible Demo-Zuteilung, wenn dynamisches Lastmanagement
     // aktiv ist (simulierter Überschuss) – sonst 0 A (konservativ, wie in der
     // echten Anwendung ohne Überschussdaten).
-    if (cfg.management_mode === "dynamic" && cfg.dynamic_meter_enabled && pvCps.length) {
-      const simulatedSurplus = 12; // Demo-Fixwert
-      Object.assign(setpoints, waterFill(pvCps, simulatedSurplus));
+    if (dynamicMeterActive && pvCps.length) {
+      Object.assign(setpoints, waterFill(pvCps, SIMULATED_SURPLUS_A));
     } else {
       pvCps.forEach((cp) => (setpoints[cp.id] = 0));
     }
 
-    return { setpoints, limit, blockedIds: new Set(state.chargePoints.filter((cp) => cp.enabled && isBlocked(cp.schedules, now)).map((cp) => cp.id)) };
+    return {
+      setpoints, limit, surplus,
+      blockedIds: new Set(state.chargePoints.filter((cp) => cp.enabled && isBlocked(cp.schedules, now)).map((cp) => cp.id)),
+    };
   }
 
   function buildStatusSnapshot() {
-    const { setpoints, limit, blockedIds } = allocate();
+    const { setpoints, limit, surplus, blockedIds } = allocate();
     const load = { L1: 0, L2: 0, L3: 0 };
     const chargePoints = state.chargePoints.map((cp) => {
       const sp = setpoints[cp.id] || 0;
@@ -199,6 +214,7 @@
       en14a_active: !!(cfg.en14a_enabled && cfg.en14a_active),
       phase_load_a: load,
       phase_available_a: { L1: limit, L2: limit, L3: limit },
+      phase_surplus_a: surplus,
       active_charge_points: chargePoints.filter((cp) => cp.online && cp.setpoint_a > 0).length,
       total_charge_points: state.chargePoints.length,
       last_cycle: new Date().toISOString(),
@@ -313,6 +329,11 @@
       if (!state.config.cloud_relay_url || !state.config.cloud_relay_token)
         return json({ ok: false, error: "Cloud-URL oder Token fehlt" });
       return json({ ok: false, error: "Demo-Modus: keine echte Cloud-Verbindung möglich" });
+    }
+    if (path === "/api/config/mqtt/test" && method === "POST") {
+      if (!state.config.mqtt_host)
+        return json({ ok: false, error: "MQTT-Host fehlt" });
+      return json({ ok: false, error: "Demo-Modus: keine echte MQTT-Verbindung möglich" });
     }
 
     // /api/boards ...

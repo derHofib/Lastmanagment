@@ -142,6 +142,7 @@ class LoadManagerService:
             "charge_points": {},
             "phase_load_a": {p: 0.0 for p in PHASES},
             "phase_available_a": {p: 0.0 for p in PHASES},
+            "phase_surplus_a": {p: 0.0 for p in PHASES},
             "effective_limit_current_a": 0.0,
             "en14a_active": False,
             "active_stations": 0,
@@ -422,7 +423,7 @@ class LoadManagerService:
         await asyncio.to_thread(self._persist, cp_specs, values_by_id, online_station_ids)
         self._update_snapshot(
             cp_specs, values_by_id, station_error_by_id, online_station_ids, targets,
-            capacity, effective_limit, en14a_active, alloc_stations, meter_ok
+            capacity, effective_limit, en14a_active, alloc_stations, meter_ok, surplus
         )
         return max(0.5, cfg["poll_interval_s"])
 
@@ -532,7 +533,7 @@ class LoadManagerService:
 
     def _update_snapshot(
         self, cp_specs, values_by_id, station_error_by_id, online_station_ids, targets,
-        capacity, effective_limit, en14a_active, alloc_stations, meter_ok,
+        capacity, effective_limit, en14a_active, alloc_stations, meter_ok, surplus,
     ):
         cp_snap = {}
         for cp in cp_specs:
@@ -552,6 +553,7 @@ class LoadManagerService:
             "charge_points": cp_snap,
             "phase_load_a": load,
             "phase_available_a": capacity,
+            "phase_surplus_a": surplus,
             "effective_limit_current_a": effective_limit,
             "en14a_active": en14a_active,
             "active_stations": len(alloc_stations),

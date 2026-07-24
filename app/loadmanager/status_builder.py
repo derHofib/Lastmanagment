@@ -32,6 +32,7 @@ def build_system_status(session: Session) -> SystemStatus:
         en14a_active=snap.get("en14a_active", False),
         phase_load_a=snap.get("phase_load_a", {p: 0.0 for p in PHASES}),
         phase_available_a=snap.get("phase_available_a", {p: 0.0 for p in PHASES}),
+        phase_surplus_a=snap.get("phase_surplus_a", {p: 0.0 for p in PHASES}),
         active_charge_points=snap.get("active_stations", 0),
         total_charge_points=total,
         last_cycle=snap.get("last_cycle"),

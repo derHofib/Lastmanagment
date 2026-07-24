@@ -74,6 +74,14 @@ _NEW_COLUMNS = {
         ("cloud_relay_url", "VARCHAR"),
         ("cloud_relay_token", "VARCHAR"),
         ("cloud_relay_interval_s", "FLOAT DEFAULT 30.0"),
+        ("mqtt_enabled", "BOOLEAN DEFAULT 0"),
+        ("mqtt_host", "VARCHAR"),
+        ("mqtt_port", "INTEGER DEFAULT 1883"),
+        ("mqtt_username", "VARCHAR"),
+        ("mqtt_password", "VARCHAR"),
+        ("mqtt_topic_prefix", "VARCHAR DEFAULT 'voltibus'"),
+        ("mqtt_interval_s", "FLOAT DEFAULT 10.0"),
+        ("mqtt_ha_discovery", "BOOLEAN DEFAULT 1"),
     ],
 }
 

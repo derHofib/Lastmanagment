@@ -32,6 +32,11 @@ def client(monkeypatch):
 
     monkeypatch.setattr(cloud_relay_service, "start", lambda: None)
 
+    # Gleicher Grund für die MQTT-Anbindung
+    from app.loadmanager.mqtt_publisher import service as mqtt_publisher_service
+
+    monkeypatch.setattr(mqtt_publisher_service, "start", lambda: None)
+
     from app.db import Base, engine, init_db
 
     # Frische Tabellen

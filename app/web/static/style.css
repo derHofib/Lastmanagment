@@ -176,3 +176,37 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.32); backdrop-filter: blur(6px); 
 }
 .schedule-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
   padding: 8px 0; border-top: 1px solid var(--border); }
+
+/* Energiefluss (vereinfachte Visualisierung) */
+.flow-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.flow-sources { display: flex; flex-direction: column; gap: 12px; }
+.flow-node {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 10px 18px; min-width: 150px; text-align: center;
+}
+.flow-node .flow-label {
+  display: block; font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .04em; font-weight: 600;
+}
+.flow-node .flow-value { display: block; font-size: 19px; font-weight: 700; margin-top: 3px; }
+.flow-node.flow-pv { border-color: rgba(52, 199, 89, .35); }
+.flow-node.flow-pv .flow-value { color: #1c7a3c; }
+.flow-node.flow-cp .flow-value { color: var(--accent); }
+
+.flow-lines { flex: 1 1 100px; min-width: 70px; display: flex; flex-direction: column; gap: 14px; justify-content: center; }
+.flow-line {
+  height: var(--flow-h, 4px); border-radius: 999px; background: var(--control);
+  position: relative; overflow: hidden;
+}
+.flow-line::after {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, var(--accent) 0 10px, transparent 10px 20px);
+  animation: flow-move var(--flow-dur, 1s) linear infinite;
+}
+.flow-line-pv::after {
+  background: repeating-linear-gradient(90deg, #34c759 0 10px, transparent 10px 20px);
+}
+@keyframes flow-move { from { background-position: 0 0; } to { background-position: 20px 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .flow-line::after { animation: none; }
+}
