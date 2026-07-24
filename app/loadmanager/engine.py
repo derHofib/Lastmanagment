@@ -133,6 +133,36 @@ def _allocate_equal(
     return targets
 
 
+def _allocate_priority(
+    stations: list[AllocStation],
+    capacity: dict[str, float],
+) -> dict[int, float]:
+    """Kaskadierende Prioritäts-Zuteilung.
+
+    Die Stationen werden nach Priorität in Stufen gruppiert (höchste Zahl
+    zuerst). Jede Stufe bekommt die zu diesem Zeitpunkt noch verbleibende
+    Kapazität per Water-Filling (:func:`_allocate_equal`) zugeteilt – bei
+    nur einer Station in der Stufe entspricht das schlicht ihrem Maximum
+    (sofern genug übrig ist), bei mehreren Stationen GLEICHER Priorität wird
+    die Restkapazität fair unter ihnen aufgeteilt statt nach
+    Anschlussreihenfolge. Was eine Stufe nicht ausschöpft, steht der
+    nächstniedrigeren Stufe zur Verfügung.
+    """
+    remaining = dict(capacity)
+    targets: dict[int, float] = {}
+    tiers: dict[int, list[AllocStation]] = {}
+    for st in stations:
+        tiers.setdefault(st.priority, []).append(st)
+    for prio in sorted(tiers, reverse=True):
+        tier_stations = tiers[prio]
+        tier_targets = _allocate_equal(tier_stations, remaining)
+        for st in tier_stations:
+            targets[st.id] = tier_targets[st.id]
+            for p in st.phases:
+                remaining[p] -= tier_targets[st.id]
+    return targets
+
+
 def allocate(
     stations: list[AllocStation],
     capacity: dict[str, float],
@@ -152,9 +182,7 @@ def allocate(
     capacity = {p: max(0.0, capacity.get(p, 0.0)) for p in PHASES}
 
     def order_key(s: AllocStation):
-        if strategy is DistributionStrategy.PRIORITY:
-            return (-s.priority, s.order, s.id)
-        return (s.order, s.id)  # FIFO
+        return (s.order, s.id)  # FIFO: frühere Steckzeit zuerst
 
     active = list(stations)
     # Iterativ: nach jeder Zuteilung Stationen < min_current pausieren und
@@ -165,6 +193,8 @@ def allocate(
 
         if strategy is DistributionStrategy.EQUAL:
             targets = _allocate_equal(active, capacity)
+        elif strategy is DistributionStrategy.PRIORITY:
+            targets = _allocate_priority(active, capacity)
         else:
             ordered = sorted(active, key=order_key)
             targets = _allocate_greedy(ordered, capacity)

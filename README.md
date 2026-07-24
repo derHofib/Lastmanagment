@@ -198,6 +198,21 @@ festlegt (Kaskadierung wie bei CSS). Ohne Angabe gilt die global eingestellte
 Strategie. So kann z. B. eine Unterverteilung im Carport `priority` fahren,
 während der Rest der Anlage `equal` verteilt.
 
+**`priority`-Strategie im Detail (kaskadierende Stufen, faire Aufteilung
+innerhalb einer Stufe):** Ladepunkte **und** Unterverteiler-Zweige auf
+derselben Ebene werden nach ihrer Prioritätszahl absteigend gruppiert. Die
+höchste Stufe bekommt zuerst Kapazität bis zu ihrem jeweiligen Maximum (bzw.
+bei einem Unterverteiler-Zweig bis zu dessen eigener Absicherung); was
+übrig bleibt, geht an die nächstniedrigere Stufe usw. Haben **mehrere**
+Ladepunkte oder Unterverteiler dieselbe Priorität, teilen sie sich die zu
+diesem Zeitpunkt verbleibende Kapazität **fair** untereinander (Water-Filling
+wie bei `equal`) statt nach Anschlussreihenfolge. Das gilt auf jeder
+Baumebene erneut: eine Unterverteilung mit der höchsten Priorität bekommt
+zuerst die maximal mögliche Leistung bis zu ihrer eigenen Absicherung
+zugeteilt, und **innerhalb** dieser Unterverteilung teilen sich ihre eigenen
+Ladepunkte diese Kapazität wiederum nach ihrer eigenen Priorität auf
+(`app/loadmanager/engine.py::_allocate_priority`).
+
 ---
 
 ## Doppel-Wallboxen (zwei Ladepunkte je Station)

@@ -105,6 +105,35 @@ def test_priority_leftover_to_next():
     assert_within_limits(res, stations, capacity)
 
 
+def test_priority_same_tier_splits_fairly_not_by_order():
+    # Zwei Stationen mit GLEICHER Priorität, aber unterschiedlicher
+    # Steckreihenfolge (order): die verbleibende Kapazität wird fair
+    # aufgeteilt (Water-Filling), nicht strikt nach Anschlussreihenfolge.
+    stations = [s(1, prio=5, mx=32, order=1), s(2, prio=5, mx=32, order=2)]
+    capacity = cap(40, 40, 40)
+    res = allocate(stations, capacity, DistributionStrategy.PRIORITY)
+    assert res[1] == 20
+    assert res[2] == 20
+    assert_within_limits(res, stations, capacity)
+
+
+def test_priority_cascade_with_shared_tier():
+    # Höchste Priorität zuerst (voll), danach teilen sich zwei Stationen mit
+    # gleicher (niedrigerer) Priorität den Rest fair untereinander.
+    stations = [
+        s(1, prio=10, mx=16),
+        s(2, prio=3, mx=32, order=1),
+        s(3, prio=3, mx=32, order=5),
+    ]
+    capacity = cap(32, 32, 32)
+    res = allocate(stations, capacity, DistributionStrategy.PRIORITY)
+    assert res[1] == 16
+    # Rest: 32 - 16 = 16 A, fair auf 2 und 3 aufgeteilt -> je 8 A
+    assert res[2] == 8
+    assert res[3] == 8
+    assert_within_limits(res, stations, capacity)
+
+
 # --- FIFO ------------------------------------------------------------------
 
 def test_fifo_order():
@@ -332,6 +361,38 @@ def test_allocate_tree_random_never_exceeds_any_node(strategy):
 
 
 # --- Strategie pro Verteiler (Kaskadierung) --------------------------------
+
+def test_allocate_tree_board_priority_cascades_then_station_priority_inside():
+    # Zwei Unterverteilungen mit unterschiedlicher Priorität hängen an der
+    # Hauptverteilung: die mit der höheren Prioritätszahl bekommt zuerst
+    # Kapazität bis zu ihrer eigenen Absicherung, der Rest geht an die
+    # niedriger priorisierte. INNERHALB jeder Unterverteilung teilen sich
+    # ihre Ladepunkte die ihr zugeteilte Kapazität wiederum nach ihrer
+    # eigenen Priorität (hier: gleiche Priorität -> fair geteilt).
+    high_a = s(10, prio=5, mx=32)
+    high_b = s(11, prio=5, mx=32)
+    high_board = BoardNode(id=2, fuse_a=25, priority=10,
+                            strategy=DistributionStrategy.PRIORITY,
+                            stations=(high_a, high_b))
+
+    low_a = s(20, prio=1, mx=32)
+    low_board = BoardNode(id=3, fuse_a=25, priority=1,
+                           strategy=DistributionStrategy.PRIORITY,
+                           stations=(low_a,))
+
+    root = BoardNode(id=1, fuse_a=32, children=(high_board, low_board))
+    result = allocate_tree(root, cap(32, 32, 32), DistributionStrategy.PRIORITY)
+
+    # high_board (Prio 10) bekommt zuerst volle Kapazität bis zu seiner
+    # eigenen Absicherung (25 A) -> die beiden gleich priorisierten
+    # Ladepunkte darunter teilen sich diese 25 A fair (je 12.5 A, konservativ
+    # auf ganze Ampere abgerundet -> je 12 A).
+    assert result[10] == 12
+    assert result[11] == 12
+    # low_board (Prio 1) bekommt nur den Rest der Wurzel-Kapazität (32-25=7 A)
+    assert result[20] == 7
+    assert_tree_within_limits(root, result)
+
 
 def test_allocate_tree_board_strategy_override_changes_split():
     # Unterverteilung überschreibt die globale EQUAL-Strategie auf PRIORITY
